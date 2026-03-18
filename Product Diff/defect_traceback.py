@@ -219,7 +219,8 @@ class OriginDetector:
 
     def analyze_in_process_space(self, og_gray, proc_gray,
                                   og_rect, proc_center, pad,
-                                  align_result, filename, outdir=None) -> OriginVerdict:
+                                  align_result, filename, outdir=None,
+                                  defect_id="") -> OriginVerdict:
         """Compare OG defect zone against process image in process space.
         Warps the OG patch using the homography to match process resolution/scale,
         then refines locally with template matching."""
@@ -292,11 +293,11 @@ class OriginDetector:
         C1, C2 = 6.5025, 58.5225
         og_f = og_comp.astype(np.float64)
         pr_f = pr_comp.astype(np.float64)
-        mu1 = cv2.GaussianBlur(og_f, (11, 11), 1.5)
-        mu2 = cv2.GaussianBlur(pr_f, (11, 11), 1.5)
-        sig1_sq = cv2.GaussianBlur(og_f ** 2, (11, 11), 1.5) - mu1 ** 2
-        sig2_sq = cv2.GaussianBlur(pr_f ** 2, (11, 11), 1.5) - mu2 ** 2
-        sig12 = cv2.GaussianBlur(og_f * pr_f, (11, 11), 1.5) - mu1 * mu2
+        mu1 = cv2.GaussianBlur(og_f, (11, 11), 3)
+        mu2 = cv2.GaussianBlur(pr_f, (11, 11), 3)
+        sig1_sq = cv2.GaussianBlur(og_f ** 2, (11, 11), 3) - mu1 ** 2
+        sig2_sq = cv2.GaussianBlur(pr_f ** 2, (11, 11), 3) - mu2 ** 2
+        sig12 = cv2.GaussianBlur(og_f * pr_f, (11, 11), 3) - mu1 * mu2
         ssim_map = ((2 * mu1 * mu2 + C1) * (2 * sig12 + C2)) / \
                    ((mu1 ** 2 + mu2 ** 2 + C1) * (sig1_sq + sig2_sq + C2))
         ssim_val = float(ssim_map.mean())
@@ -361,6 +362,46 @@ class OriginDetector:
                         pr_pn = (pr_prof - pr_prof.mean()) / (pr_prof.std() + 1e-6)
                         profile_corr = float(np.corrcoef(og_pn, pr_pn)[0, 1])
 
+        # ---- Metric 6: Spatial anomaly (process-internal) ----
+        # Check if the process image itself shows a localized disturbance at
+        # the expected defect position.  Catches defects that change shape
+        # across process steps but remain spatially anchored in the zone.
+        # Uses the RAW process patch (pr_patch) to avoid CLAHE artifacts.
+        spatial_anomaly = 0.0
+        outer_mask = np.ones((wh, ww), dtype=bool)
+        outer_mask[dty1:dty2, dtx1:dtx2] = False
+        inner_px = pr_patch[dty1:dty2, dtx1:dtx2].astype(float)
+        outer_px = pr_patch[outer_mask].astype(float)
+        if inner_px.size > 10 and outer_px.size > 50:
+            # Intensity: median-based z-score (robust to structure)
+            inner_med = float(np.median(inner_px))
+            outer_med = float(np.median(outer_px))
+            outer_mad = float(np.median(np.abs(outer_px - outer_med))) + 1e-6
+            iz = abs(inner_med - outer_med) / (outer_mad * 1.4826)  # MAD → σ
+
+            # Texture: difference in local variability (std)
+            inner_std = float(inner_px.std())
+            outer_std = float(outer_px.std()) + 1e-6
+            tz = abs(inner_std - outer_std) / outer_std
+
+            # Edge density: localized edge concentration
+            pr_edge_raw = cv2.Canny(pr_patch, 30, 80)
+            inner_ed = float((pr_edge_raw[dty1:dty2, dtx1:dtx2] > 0).mean())
+            outer_ed = float((pr_edge_raw[outer_mask] > 0).mean()) + 1e-6
+            ez = abs(inner_ed - outer_ed) / outer_ed
+
+            # Gradient energy: Laplacian concentration in defect zone
+            lap = cv2.Laplacian(pr_patch, cv2.CV_64F)
+            inner_lap = float(np.abs(lap[dty1:dty2, dtx1:dtx2]).mean())
+            outer_lap = float(np.abs(lap[outer_mask]).mean()) + 1e-6
+            gz = abs(inner_lap - outer_lap) / outer_lap
+
+            spatial_anomaly = min(1.0,
+                0.30 * min(iz, 3.0) / 3.0 +
+                0.25 * min(tz, 3.0) / 3.0 +
+                0.25 * min(ez, 3.0) / 3.0 +
+                0.20 * min(gz, 3.0) / 3.0)
+
         metrics = {
             "tmatch": round(tmatch_score, 3),
             "ncc": round(ncc_val, 3),
@@ -368,6 +409,7 @@ class OriginDetector:
             "edge_overlap": round(edge_overlap, 3),
             "tight_corr": round(tight_corr, 3),
             "profile_corr": round(profile_corr, 3),
+            "spatial_anomaly": round(spatial_anomaly, 3),
             "is_thin": is_thin,
             "inverted": was_inverted,
             "refine_shift": f"({dx},{dy})",
@@ -380,55 +422,141 @@ class OriginDetector:
             scale = max(1, 300 // max(row.shape[0], 1))
             if scale > 1:
                 row = cv2.resize(row, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
-            dbg_path = os.path.join(outdir, f"DBG_{filename.replace('.jpg', '')}_OG_vs_PROC.jpg")
+            tag = f"_{defect_id}" if defect_id else ""
+            dbg_path = os.path.join(outdir, f"DBG_{filename.replace('.jpg', '')}{tag}_OG_vs_PROC.jpg")
             cv2.imwrite(dbg_path, row)
 
         # ---- Decision logic ----
-        # Negative tight_corr = defect zone anti-correlates → penalize (not ignore)
-        tight_term_thin = 0.25 * tight_corr if tight_corr >= 0 else 0.10 * tight_corr
-        tight_term_norm = 0.25 * tight_corr if tight_corr >= 0 else 0.10 * tight_corr
+        # Two complementary signals:
+        #   1. OG similarity — does the zone look like the OG defect? (shape-preserving)
+        #   2. Spatial anomaly — is there ANY disturbance here? (shape-agnostic)
+        #
+        # A defect is PRESENT if either signal is strong.
+        # A zone is ABSENT only if BOTH signals are weak.
+
+        # -- OG similarity component --
+        t_term = tmatch_score if tmatch_score > 0 else tmatch_score * 0.5
+        s_term = ssim_val if ssim_val > 0 else ssim_val * 0.5
+        tight_term = 0.25 * tight_corr if tight_corr >= 0 else 0.10 * tight_corr
+
         if is_thin:
-            # For thin/line defects: reduce edge weight (dominated by IC structure),
-            # add profile correlation which captures the perpendicular defect signal
-            score = (0.20 * max(tmatch_score, 0) +
-                     0.15 * max(ssim_val, 0) +
-                     0.05 * edge_overlap +
-                     tight_term_thin +
-                     0.35 * max(profile_corr, 0))
+            og_score = (0.15 * t_term +
+                        0.10 * s_term +
+                        0.05 * edge_overlap +
+                        tight_term +
+                        0.25 * max(profile_corr, 0))
         else:
-            score = (0.30 * max(tmatch_score, 0) +
-                     0.25 * max(ssim_val, 0) +
-                     0.20 * edge_overlap +
-                     tight_term_norm)
-        # Patch-level inversion penalty: image-level contrast matching already
-        # handles legitimate OG/process inversion.  If a patch still needs
-        # inversion, it usually means the local warp is bad (artifacts create
-        # spurious correlation after inversion + brightness matching).
+            og_score = (0.20 * t_term +
+                        0.15 * s_term +
+                        0.10 * edge_overlap +
+                        tight_term)
+
+        # Context gate: if structural layer is fundamentally different,
+        # discount OG similarity (but don't touch spatial anomaly).
+        if tmatch_score < 0.15:
+            og_score *= 0.4
+
         if was_inverted:
-            score *= 0.85
+            og_score *= 0.85
+
+        # -- Combined score: OG match OR spatial anomaly --
+        # Use the stronger of the two signals, with a weighted blend
+        # so that both contribute when they agree.
+        score = max(og_score, 0.70 * spatial_anomaly,
+                    0.50 * og_score + 0.50 * spatial_anomaly)
+
+        metrics["og_score"] = round(og_score, 3)
         metrics["score"] = round(score, 3)
 
         prof_str = f", profile={profile_corr:.2f}" if is_thin else ""
+        sa_str = f", sa={spatial_anomaly:.2f}"
         if score > 0.40:
             confidence = min(1.0, score)
             status = "PRESENT"
-            detail = (f"Defect matches (score={score:.2f}, "
-                      f"tmatch={tmatch_score:.2f}, ssim={ssim_val:.2f}, "
-                      f"edge={edge_overlap:.2f}, tight={tight_corr:.2f}{prof_str})")
+            detail = (f"Defect detected (score={score:.2f}, "
+                      f"og={og_score:.2f}{sa_str}, "
+                      f"tmatch={tmatch_score:.2f}, tight={tight_corr:.2f}{prof_str})")
         elif score < 0.18:
             confidence = min(1.0, 1.0 - score)
             status = "ABSENT"
-            detail = (f"Defect zone differs (score={score:.2f}, "
-                      f"tmatch={tmatch_score:.2f}, ssim={ssim_val:.2f}, "
-                      f"edge={edge_overlap:.2f}{prof_str})")
+            detail = (f"Zone clean (score={score:.2f}, "
+                      f"og={og_score:.2f}{sa_str}, "
+                      f"tmatch={tmatch_score:.2f}{prof_str})")
         else:
             confidence = 0.3
             status = "INCONCLUSIVE"
-            detail = (f"Ambiguous (score={score:.2f}, tmatch={tmatch_score:.2f}, "
-                      f"ssim={ssim_val:.2f}, edge={edge_overlap:.2f}, "
-                      f"tight={tight_corr:.2f}{prof_str})")
+            detail = (f"Ambiguous (score={score:.2f}, og={og_score:.2f}{sa_str}, "
+                      f"tmatch={tmatch_score:.2f}, tight={tight_corr:.2f}{prof_str})")
 
         return OriginVerdict(filename, status, confidence, detail, metrics)
+
+    def compare_in_out(self, in_gray, out_gray, aligner,
+                       in_align, out_align, og_rect, ref_rect, pad,
+                       ref_w, ref_h) -> float:
+        """Compare the defect zone between In and Out of the same step.
+        Returns a differential score: high = zone changed (defect introduced),
+        low = zone unchanged (defect was not introduced at this step).
+
+        Both images are already aligned to the OG reference via their own
+        homographies, so we map the defect zone into each and compare directly.
+        """
+        def _extract_zone(proc_gray, align_result):
+            """Extract the defect zone from a process image using its alignment."""
+            proc_center = aligner.map_point(
+                ((og_rect[0]+og_rect[2])//2, (og_rect[1]+og_rect[3])//2),
+                align_result)
+            if proc_center is None:
+                return None
+            ph, pw = proc_gray.shape[:2]
+            cx, cy = proc_center
+            if cx < 0 or cy < 0 or cx >= pw or cy >= ph:
+                return None
+
+            proc_rect = aligner.map_rect(ref_rect, align_result, pad=pad)
+            if proc_rect is None:
+                return None
+            px1, py1, px2, py2 = proc_rect
+            px1 = max(0, px1); py1 = max(0, py1)
+            px2 = min(pw, px2); py2 = min(ph, py2)
+            if px2 - px1 < 5 or py2 - py1 < 5:
+                return None
+            return proc_gray[py1:py2, px1:px2]
+
+        in_zone = _extract_zone(in_gray, in_align)
+        out_zone = _extract_zone(out_gray, out_align)
+
+        if in_zone is None or out_zone is None:
+            return 0.0
+
+        # Resize to common dimensions for comparison
+        target_h = min(in_zone.shape[0], out_zone.shape[0])
+        target_w = min(in_zone.shape[1], out_zone.shape[1])
+        if target_h < 5 or target_w < 5:
+            return 0.0
+        in_z = cv2.resize(in_zone, (target_w, target_h)).astype(float)
+        out_z = cv2.resize(out_zone, (target_w, target_h)).astype(float)
+
+        # Normalize brightness to make comparison robust
+        in_z = (in_z - in_z.mean()) / (in_z.std() + 1e-6)
+        out_z = (out_z - out_z.mean()) / (out_z.std() + 1e-6)
+
+        # Correlation: high = similar (no change), low/negative = changed
+        corr = float(np.corrcoef(in_z.ravel(), out_z.ravel())[0, 1])
+
+        # SSIM between zones
+        C1, C2 = 6.5025, 58.5225
+        mu1 = cv2.GaussianBlur(in_z, (7, 7), 1.5)
+        mu2 = cv2.GaussianBlur(out_z, (7, 7), 1.5)
+        sig1_sq = cv2.GaussianBlur(in_z**2, (7, 7), 1.5) - mu1**2
+        sig2_sq = cv2.GaussianBlur(out_z**2, (7, 7), 1.5) - mu2**2
+        sig12 = cv2.GaussianBlur(in_z * out_z, (7, 7), 1.5) - mu1 * mu2
+        ssim_map = ((2*mu1*mu2 + C1) * (2*sig12 + C2)) / \
+                   ((mu1**2 + mu2**2 + C1) * (sig1_sq + sig2_sq + C2))
+        ssim_val = float(ssim_map.mean())
+
+        # Differential: 0 = identical (no defect introduced), 1 = very different
+        diff_score = max(0.0, 1.0 - (0.5 * max(corr, 0) + 0.5 * max(ssim_val, 0)))
+        return round(diff_score, 3)
 
 
 # ============================================================
@@ -742,7 +870,8 @@ def main():
                 proc_gray_n = cv2.cvtColor(proc_n, cv2.COLOR_BGR2GRAY)
                 v = detector.analyze_in_process_space(
                     og_gray, proc_gray_n, og_rect, proc_center, pad,
-                    ar, fname, outdir=outdir)
+                    ar, fname, outdir=outdir,
+                    defect_id=f"{d.dr_sub_item}_ctr{int(d.box_ctr_x)}_{int(d.box_ctr_y)}")
             else:
                 v = OriginVerdict(fname, "INCONCLUSIVE", 0, "Center mapping failed", {})
             verdicts.append(v)
@@ -773,15 +902,70 @@ def main():
 
         # --- Determine origin ---
         origin = "UNKNOWN"
-        # Process images sorted newest → oldest (lower number = latest).
-        # Scan forward (newest → oldest); keep updating so origin ends up
-        # as the earliest (oldest) process step where defect is PRESENT.
+
+        # Build In/Out step pairs from verdicts and filenames
+        step_pairs: Dict[int, Dict[str, OriginVerdict]] = {}
         for v in verdicts:
-            if v.status == "PRESENT":
-                origin = v.filename
+            if v.status in ("ALIGN_FAIL", "OUT_OF_VIEW"):
+                continue
+            m = re.match(r'(\d+)_(In|Out)', v.filename, re.IGNORECASE)
+            if m:
+                step_num = int(m.group(1))
+                io_type = m.group(2).lower()
+                step_pairs.setdefault(step_num, {})[io_type] = v
+
+        # Strategy 1: In/Out DIFFERENTIAL — directly compare the defect
+        # zone between In and Out of each step.  Shape-agnostic: detects
+        # ANY change at the expected location, regardless of what the
+        # defect looks like.
+        io_diffs: Dict[int, float] = {}
+        for step_num in sorted(step_pairs.keys(), reverse=True):
+            pair = step_pairs[step_num]
+            if 'in' not in pair or 'out' not in pair:
+                continue
+            in_fname = pair['in'].filename
+            out_fname = pair['out'].filename
+            in_ar = alignments[in_fname]
+            out_ar = alignments[out_fname]
+            if not in_ar.ok or not out_ar.ok:
+                continue
+            in_gray = cv2.cvtColor(proc_imgs_mild[in_fname], cv2.COLOR_BGR2GRAY)
+            out_gray = cv2.cvtColor(proc_imgs_mild[out_fname], cv2.COLOR_BGR2GRAY)
+            step_pad = max(in_ar.adaptive_pad, out_ar.adaptive_pad)
+            diff_score = detector.compare_in_out(
+                in_gray, out_gray, aligner,
+                in_ar, out_ar, og_rect, ref_rect, step_pad,
+                w_og, h_og)
+            io_diffs[step_num] = diff_score
+            print(f"    In/Out diff step {step_num}: {diff_score:.3f}")
+
+        # Find step with highest differential (most change at defect zone)
+        if io_diffs:
+            best_step = max(io_diffs, key=lambda k: io_diffs[k])
+            best_diff = io_diffs[best_step]
+            if best_diff > 0.15:  # significant change detected
+                origin = f"{best_step}_Out.jpg"
+            elif best_diff > 0.08:
+                # Moderate change — combine with OG scores for decision
+                pair = step_pairs[best_step]
+                out_score = pair['out'].metrics.get('score', 0)
+                in_score = pair['in'].metrics.get('score', 0)
+                if out_score > in_score:
+                    origin = f"{best_step}_Out.jpg"
+
+        # Strategy 2: OG-score based — clear PRESENT/ABSENT transitions
         if origin == "UNKNOWN":
-            # No clear PRESENT — check for significant score difference
-            # among INCONCLUSIVE verdicts to pick the most likely origin
+            for step_num in sorted(step_pairs.keys(), reverse=True):
+                pair = step_pairs[step_num]
+                if 'in' not in pair or 'out' not in pair:
+                    continue
+                in_v, out_v = pair['in'], pair['out']
+                if out_v.status == "PRESENT" and in_v.status != "PRESENT":
+                    origin = out_v.filename
+                    break
+
+        # Strategy 3: Score-based fallback for all-INCONCLUSIVE
+        if origin == "UNKNOWN":
             valid = [v for v in verdicts if v.status not in ("ALIGN_FAIL", "OUT_OF_VIEW")]
             if len(valid) >= 2:
                 scores = [v.metrics.get('score', 0) for v in valid]
@@ -791,10 +975,18 @@ def main():
                 avg_others = sum(other_scores) / len(other_scores) if other_scores else 0
                 if max_score > 0.25 and max_score > avg_others * 1.3:
                     origin = valid[max_idx].filename
+
+        # Strategy 4: Fallbacks
+        if origin == "UNKNOWN":
+            for v in verdicts:
+                if v.status == "PRESENT":
+                    origin = v.filename
+                    break
         if origin == "UNKNOWN":
             for v in verdicts:
                 if v.status == "INCONCLUSIVE":
                     origin = f"INCONCLUSIVE (possibly {v.filename})"
+                    break
         if origin == "UNKNOWN" and all(v.status == "ABSENT" for v in verdicts):
             origin = "DVI (defect first appears at final inspection)"
 
@@ -831,7 +1023,7 @@ def main():
             (5, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.55, C_WHITE, 1, cv2.LINE_AA)
         panel = np.vstack([title, panel])
 
-        ppath = os.path.join(outdir, f"PANEL_{d.dr_sub_item}.jpg")
+        ppath = os.path.join(outdir, f"PANEL_{d.dr_sub_item}_ctr{int(d.box_ctr_x)}_{int(d.box_ctr_y)}.jpg")
         cv2.imwrite(ppath, panel, [cv2.IMWRITE_JPEG_QUALITY, 95])
 
         all_results.append((d, verdicts, origin, ppath))

@@ -37,9 +37,8 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, Dict
 
 
-# ============================================================
+
 # Data Classes
-# ===========================================================
 @dataclass
 class AxisAffine:
     """Axis-aligned affine: x' = sx·x + tx,  y' = sy·y + ty"""
@@ -112,9 +111,9 @@ class AxisAffine:
         return inv.to_3x3() if inv else None
 
 
-# ============================================================
+
 # Preprocessing
-# ============================================================
+
 def detect_active_region(gray: np.ndarray, border_thresh: int = 15,
                          min_fraction: float = 0.4) -> Tuple[int, int, int, int]:
     """Bounding box of active content, ignoring black borders / corner dots.
@@ -181,9 +180,9 @@ def enhance_for_alignment(gray: np.ndarray, clip_limit: float = 6.0) -> np.ndarr
     return out
 
 
-# ============================================================
+
 # RANSAC axis-aligned affine fitter
-# ============================================================
+
 def _fit_from_two(src: np.ndarray, dst: np.ndarray,
                   i: int, j: int) -> Optional[Tuple[float, float, float, float]]:
     """Solve (sx, sy, tx, ty) exactly from two point pairs."""
@@ -286,9 +285,8 @@ def fit_axis_affine_ransac(
     )
 
 
-# ============================================================
+
 # Feature Matching + Axis-Aligned Aligner
-# ============================================================
 class AxisAligner:
     """Drop-in replacement for Aligner in defect_traceback.py.
 
@@ -465,9 +463,8 @@ class AxisAligner:
         return cv2.warpAffine(og, affine.to_2x3(), (w, h))
 
 
-# ============================================================
+
 # Visual Diagnostics
-# ============================================================
 def _checkerboard_blend(img1: np.ndarray, img2: np.ndarray,
                         block: int = 80) -> np.ndarray:
     if img1.shape[:2] != img2.shape[:2]:
@@ -569,9 +566,9 @@ def draw_diagnostics(og: np.ndarray, proc: np.ndarray,
     return paths
 
 
-# ============================================================
+
 # Structural landmark detection — package rectangle
-# ============================================================
+
 
 def find_package_rect(gray: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
     """Detect the outer package rectangle as (x1, y1, x2, y2).
@@ -667,9 +664,9 @@ def validate_with_landmarks(og_gray: np.ndarray, proc_gray: np.ndarray,
     }
 
 
-# ============================================================
+
 # Top-level API
-# ============================================================
+
 
 def validate_alignment(og_path: str, proc_path: str,
                        outdir: Optional[str] = None,
@@ -787,9 +784,8 @@ def validate_all(og_path: str, proc_dir: str,
     return results
 
 
-# ============================================================
-# CLI entry point
-# ============================================================
+
+# CLI (for when using separately just for aligning images)
 
 def main():
     parser = argparse.ArgumentParser(
