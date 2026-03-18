@@ -389,16 +389,8 @@ class VLMOriginDetector:
 {filenames_str}
 - Process filenames follow the pattern `<step_number>_In.jpg` (before step) and `<step_number>_Out.jpg` (after step). Higher step numbers are later in the process.
 
-## What to analyze
-For each process image, determine if the defect pattern visible in the OG image is also present:
-- Look for the same shape, contrast anomaly, scratch, particle, or texture disturbance at the expected location.
-- Process images may have different contrast, brightness, or slight misalignment — account for this.
-- A clean, uniform zone means the defect is ABSENT at that step.
-- Any localized disturbance matching the OG defect pattern means PRESENT.
-
-Then determine the **origin**: the earliest process image where the defect first appears.
-- If defect is PRESENT in `Out` but ABSENT in `In` of the same step → that step introduced it.
-- If defect is ABSENT in all process images → it was introduced at final inspection (DVI).
+## What to do
+- Given these images, help me find which picture is the origin of the defect (similar to the image on the leftmost column on every pic), give me the name of that picture.
 
 ## Response format — respond with ONLY this JSON, no other text:
 {{
