@@ -5,3 +5,4 @@
 Product Diff/pyvenv.cfg
 /Product Diff/data/output
 /Product Diff/img/output
+.claude/settings.local.json
