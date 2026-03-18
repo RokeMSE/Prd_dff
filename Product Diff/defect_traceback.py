@@ -17,8 +17,9 @@ import re
 from datetime import datetime 
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Dict
 from collections import defaultdict
+from alignment_validation import AxisAligner, AxisAffine
 
 # ============================================================
 # Configuration
@@ -82,22 +83,6 @@ class DefectBox:
 
 
 @dataclass
-class AlignResult:
-    H: Optional[np.ndarray]          # OG → process
-    H_inv: Optional[np.ndarray]      # process → OG
-    inliers: int
-    total_good: int
-    reproj_p95: float                 # p95 reprojection error in pixels
-    method: str
-    ok: bool
-
-    @property
-    def adaptive_pad(self) -> int:
-        """Padding that accounts for alignment uncertainty."""
-        return int(PAD_BASE + PAD_ERROR_MULT * self.reproj_p95)
-
-
-@dataclass
 class OriginVerdict:
     """Whether a defect is visible in a given process image."""
     filename: str
@@ -132,217 +117,316 @@ def parse_csv(path: str) -> List[DefectBox]:
 
 
 # ============================================================
-# Image Aligner
-# ============================================================
-class Aligner:
-    def __init__(self, n_feat=10000, ratio=0.75, ransac=5.0):
-        self.n_feat = n_feat
-        self.ratio = ratio
-        self.ransac = ransac
-
-    def _match(self, g1, g2, use_clahe):
-        if use_clahe:
-            cl = cv2.createCLAHE(3.0, (8, 8))
-            g1, g2 = cl.apply(g1), cl.apply(g2)
-        orb = cv2.ORB_create(nfeatures=self.n_feat, scoreType=cv2.ORB_HARRIS_SCORE)
-        kp1, d1 = orb.detectAndCompute(g1, None)
-        kp2, d2 = orb.detectAndCompute(g2, None)
-        if d1 is None or d2 is None or len(kp1) < 10 or len(kp2) < 10:
-            return None, None, []
-        bf = cv2.BFMatcher(cv2.NORM_HAMMING)
-        raw = bf.knnMatch(d1, d2, k=2)
-        good = [m for m, n in raw if m.distance < self.ratio * n.distance]
-        return kp1, kp2, good
-
-    def align(self, og: np.ndarray, proc: np.ndarray) -> AlignResult:
-        g1 = cv2.cvtColor(og, cv2.COLOR_BGR2GRAY) if og.ndim == 3 else og
-        g2 = cv2.cvtColor(proc, cv2.COLOR_BGR2GRAY) if proc.ndim == 3 else proc
-
-        best = AlignResult(None, None, 0, 0, 999., "", False)
-        strategies = [
-            ("ORB+CLAHE",  g1, g2, True),
-            ("ORB_direct", g1, g2, False),
-            ("ORB+inv_og", cv2.bitwise_not(g1), g2, True),
-            ("ORB+inv_pr", g1, cv2.bitwise_not(g2), True),
-        ]
-        for name, a, b, clahe in strategies:
-            kp1, kp2, good = self._match(a, b, clahe)
-            if kp1 is None or len(good) < 10:
-                continue
-            src = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
-            dst = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
-            H, mask = cv2.findHomography(src, dst, cv2.RANSAC, self.ransac)
-            if H is None:
-                continue
-            inl = int(mask.ravel().sum())
-            # reprojection error
-            inl_mask = mask.ravel().astype(bool)
-            proj = cv2.perspectiveTransform(src[inl_mask], H)
-            errs = np.sqrt(((proj - dst[inl_mask]) ** 2).sum(axis=2)).ravel()
-            p95 = float(np.percentile(errs, 95)) if len(errs) > 0 else 999.
-            if inl > best.inliers:
-                try:
-                    Hi = np.linalg.inv(H)
-                    best = AlignResult(H, Hi, inl, len(good), p95, name, True)
-                except np.linalg.LinAlgError:
-                    pass
-        return best
-
-    def map_rect(self, rect, align: AlignResult, pad: int = 0):
-        """Map (x1,y1,x2,y2) from OG → process, with padding."""
-        if not align.ok:
-            return None
-        x1, y1, x2, y2 = rect
-        # expand by pad before transforming
-        x1 -= pad; y1 -= pad; x2 += pad; y2 += pad
-        corners = np.float32([[x1,y1],[x2,y1],[x2,y2],[x1,y2]]).reshape(-1,1,2)
-        t = cv2.perspectiveTransform(corners, align.H)
-        pts = t.reshape(-1, 2)
-        return (int(pts[:,0].min()), int(pts[:,1].min()),
-                int(pts[:,0].max()), int(pts[:,1].max()))
-
-    def warp_to_og(self, proc, og_shape, align: AlignResult):
-        if not align.ok:
-            return None
-        h, w = og_shape[:2]
-        return cv2.warpPerspective(proc, align.H_inv, (w, h))
-
-
-# ============================================================
 # Defect Origin Detector
 # ============================================================
 class OriginDetector:
-    """Compares the defect zone between OG and each warped process image.
-    Handles contrast inversion (bright-field OG vs dark-field process)."""
+    """Compares the defect zone between OG and process images.
+    Works in PROCESS image space: extracts the OG defect patch, maps it to
+    process coords, then does a local template-match refinement to correct
+    residual alignment error before comparing."""
 
-    def _auto_invert(self, og_zone, pr_zone, valid):
+    def _prep_gray(self, img):
+        """Convert to grayscale if needed."""
+        if img.ndim == 3:
+            return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        return img
+
+    def _auto_invert(self, og_zone, pr_zone):
         """If OG and process have opposite contrast, invert process to match."""
-        og_valid = og_zone[valid].astype(float)
-        pr_valid = pr_zone[valid].astype(float)
-        if og_valid.size < 10:
+        if og_zone.size < 10 or pr_zone.size < 10:
             return pr_zone, False
-        corr = np.corrcoef(og_valid, pr_valid)[0, 1]
-        if corr < -0.3:  # Negative correlation → inverted contrast
+        corr = np.corrcoef(og_zone.ravel().astype(float),
+                           pr_zone.ravel().astype(float))[0, 1]
+        if corr < -0.3:
             return cv2.bitwise_not(pr_zone), True
         return pr_zone, False
 
-    def analyze(self, og_gray: np.ndarray, warped_gray: np.ndarray,
-                rect: Tuple[int,int,int,int], pad: int,
-                filename: str) -> OriginVerdict:
-        h, w = og_gray.shape[:2]
-        x1, y1, x2, y2 = rect
-        # expanded zone for analysis
-        ex1 = max(0, x1 - pad)
-        ey1 = max(0, y1 - pad)
-        ex2 = min(w, x2 + pad)
-        ey2 = min(h, y2 + pad)
+    def _match_brightness(self, og_zone, pr_zone):
+        """Normalize process zone brightness to match OG zone."""
+        og_f = og_zone.astype(np.float32)
+        pr_f = pr_zone.astype(np.float32)
+        og_mean, og_std = float(og_f.mean()), float(og_f.std()) + 1e-6
+        pr_mean, pr_std = float(pr_f.mean()), float(pr_f.std()) + 1e-6
+        result = (pr_f - pr_mean) * (og_std / pr_std) + og_mean
+        return np.clip(result, 0, 255).astype(np.uint8)
 
-        og_zone = og_gray[ey1:ey2, ex1:ex2]
-        pr_zone = warped_gray[ey1:ey2, ex1:ex2]
+    def _warp_og_patch(self, og_gray, og_rect, pad, H, proc_shape):
+        """Warp a local OG region into process space using the homography.
+        This handles scale/rotation differences properly."""
+        oh, ow = og_gray.shape[:2]
+        ph, pw = proc_shape[:2]
+        x1, y1, x2, y2 = og_rect
 
-        if og_zone.size == 0 or pr_zone.size == 0:
-            return OriginVerdict(filename, "OUT_OF_VIEW", 0, "Zone empty", {})
+        # Generous context around defect in OG space
+        ctx = pad + 40
+        ox1 = max(0, x1 - ctx); oy1 = max(0, y1 - ctx)
+        ox2 = min(ow, x2 + ctx); oy2 = min(oh, y2 + ctx)
 
-        # Check coverage (non-black pixels in warped zone)
-        nonzero = np.count_nonzero(pr_zone) / pr_zone.size
-        if nonzero < ZONE_NONZERO_THRESH:
+        # Map OG region corners to process space to determine output size
+        corners = np.float32([[ox1, oy1], [ox2, oy1],
+                              [ox2, oy2], [ox1, oy2]]).reshape(-1, 1, 2)
+        proc_corners = cv2.perspectiveTransform(corners, H).reshape(-1, 2)
+        pmin = proc_corners.min(axis=0).astype(int)
+        pmax = proc_corners.max(axis=0).astype(int)
+
+        # Clamp to process image bounds
+        pmin = np.maximum(pmin, 0)
+        pmax = np.minimum(pmax, [pw, ph])
+        out_w = int(pmax[0] - pmin[0])
+        out_h = int(pmax[1] - pmin[1])
+        if out_w < 5 or out_h < 5:
+            return None, None, None
+
+        # Adjust homography to output into a local crop (offset by pmin)
+        T = np.array([[1, 0, -pmin[0]], [0, 1, -pmin[1]], [0, 0, 1]], dtype=np.float64)
+        H_local = T @ H
+        warped_og = cv2.warpPerspective(og_gray, H_local, (out_w, out_h))
+
+        # Also map the tight defect box into the local crop coords
+        tight = np.float32([[x1, y1], [x2, y1], [x2, y2], [x1, y2]]).reshape(-1, 1, 2)
+        tight_proc = cv2.perspectiveTransform(tight, H_local.astype(np.float64)).reshape(-1, 2)
+        tx1 = max(0, int(tight_proc[:, 0].min()))
+        ty1 = max(0, int(tight_proc[:, 1].min()))
+        tx2 = min(out_w, int(tight_proc[:, 0].max()))
+        ty2 = min(out_h, int(tight_proc[:, 1].max()))
+
+        return warped_og, (pmin[0], pmin[1], pmin[0] + out_w, pmin[1] + out_h), (tx1, ty1, tx2, ty2)
+
+    def _local_refine_ncc(self, template, search_img, init_x, init_y, search_radius=15):
+        """Refine position via NCC template matching. Returns (dx, dy, score)."""
+        th, tw = template.shape[:2]
+        sh, sw = search_img.shape[:2]
+        if th >= sh or tw >= sw or th < 5 or tw < 5:
+            return 0, 0, 0.0
+
+        best_score = -1
+        best_dx, best_dy = 0, 0
+        for inv in [False, True]:
+            tmpl = cv2.bitwise_not(template) if inv else template
+            ncc = cv2.matchTemplate(search_img.astype(np.float32),
+                                    tmpl.astype(np.float32),
+                                    cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, max_loc = cv2.minMaxLoc(ncc)
+            if max_val > best_score:
+                best_score = max_val
+                # Expected match at center of search region minus half template
+                expected_x = search_radius
+                expected_y = search_radius
+                best_dx = max_loc[0] - expected_x
+                best_dy = max_loc[1] - expected_y
+
+        return best_dx, best_dy, float(best_score)
+
+    def analyze_in_process_space(self, og_gray, proc_gray,
+                                  og_rect, proc_center, pad,
+                                  align_result, filename, outdir=None) -> OriginVerdict:
+        """Compare OG defect zone against process image in process space.
+        Warps the OG patch using the homography to match process resolution/scale,
+        then refines locally with template matching."""
+        ph, pw = proc_gray.shape[:2]
+        cx, cy = proc_center
+
+        if cx < 0 or cy < 0 or cx >= pw or cy >= ph:
             return OriginVerdict(filename, "OUT_OF_VIEW", 0,
-                                 f"Only {nonzero*100:.0f}% coverage in warped zone",
-                                 {"coverage": float(nonzero)})
+                                 f"Mapped center ({cx},{cy}) outside process ({pw}x{ph})", {})
 
-        valid = pr_zone > 0
+        # Warp OG defect region into process space (handles scale + rotation)
+        warp_result = self._warp_og_patch(og_gray, og_rect, pad, align_result.H, proc_gray.shape)
+        if warp_result[0] is None:
+            return OriginVerdict(filename, "OUT_OF_VIEW", 0, "Warped OG patch too small", {})
 
-        # Auto-detect and handle contrast inversion
-        pr_zone_adj, was_inverted = self._auto_invert(og_zone, pr_zone, valid)
+        warped_og, (rx1, ry1, rx2, ry2), (tx1, ty1, tx2, ty2) = warp_result
+        wh, ww = warped_og.shape[:2]
 
-        # ---- Metric 1: NCC on expanded zone (contrast-adjusted) ----
-        if og_zone.shape == pr_zone_adj.shape and og_zone.size > 0:
-            ncc = cv2.matchTemplate(
-                pr_zone_adj.astype(np.float32),
-                og_zone.astype(np.float32),
-                cv2.TM_CCOEFF_NORMED
-            )
-            ncc_val = float(ncc.max()) if ncc.size > 0 else 0
-        else:
-            ncc_val = 0
+        # Detect thin/line defects (high aspect ratio)
+        defect_w = tx2 - tx1
+        defect_h = ty2 - ty1
+        min_dd = min(max(defect_w, 1), max(defect_h, 1))
+        max_dd = max(defect_w, defect_h)
+        is_thin = max_dd > 3 * min_dd and min_dd < 30
 
-        # ---- Metric 2: Gradient-based structural similarity ----
-        # Use Sobel gradients — contrast-invariant structural comparison
-        og_grad = cv2.Sobel(og_zone, cv2.CV_64F, 1, 1, ksize=3)
-        pr_grad = cv2.Sobel(pr_zone_adj, cv2.CV_64F, 1, 1, ksize=3)
-        og_gm = np.abs(og_grad)
-        pr_gm = np.abs(pr_grad)
-        # Normalize gradients
-        og_gn = og_gm / (og_gm.max() + 1e-6)
-        pr_gn = pr_gm / (pr_gm.max() + 1e-6)
-        grad_diff = np.abs(og_gn - pr_gn)[valid].mean() if valid.any() else 1.0
-        grad_sim = 1.0 - float(grad_diff)
+        # Extract corresponding process region (with extra margin for refinement)
+        sr = 15  # search radius for local refinement
+        px1 = max(0, rx1 - sr); py1 = max(0, ry1 - sr)
+        px2 = min(pw, rx2 + sr); py2 = min(ph, ry2 + sr)
+        proc_region = proc_gray[py1:py2, px1:px2]
+
+        if proc_region.shape[0] < wh or proc_region.shape[1] < ww:
+            return OriginVerdict(filename, "OUT_OF_VIEW", 0, "Process region too small for comparison", {})
+
+        # Apply CLAHE for better comparison
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        warped_og_c = clahe.apply(warped_og)
+        proc_region_c = clahe.apply(proc_region)
+
+        # Local refinement via template match
+        dx, dy, tmatch_score = self._local_refine_ncc(
+            warped_og_c, proc_region_c, 0, 0, search_radius=sr)
+
+        # Extract refined process patch (same size as warped OG)
+        off_x = (rx1 - px1) + dx
+        off_y = (ry1 - py1) + dy
+        off_x = max(0, min(off_x, proc_region.shape[1] - ww))
+        off_y = max(0, min(off_y, proc_region.shape[0] - wh))
+        pr_patch = proc_region[off_y:off_y + wh, off_x:off_x + ww]
+
+        if pr_patch.shape != warped_og.shape:
+            # Edge case: resize to match
+            pr_patch = cv2.resize(pr_patch, (ww, wh))
+
+        # Contrast normalization
+        pr_patch, was_inverted = self._auto_invert(warped_og, pr_patch)
+        pr_patch = self._match_brightness(warped_og, pr_patch)
+
+        # CLAHE for final comparison
+        og_comp = clahe.apply(warped_og)
+        pr_comp = clahe.apply(pr_patch)
+
+        # ---- Metric 1: NCC on aligned patches ----
+        ncc = cv2.matchTemplate(pr_comp.astype(np.float32),
+                                og_comp.astype(np.float32),
+                                cv2.TM_CCOEFF_NORMED)
+        ncc_val = float(ncc.max()) if ncc.size > 0 else 0
+
+        # ---- Metric 2: SSIM ----
+        C1, C2 = 6.5025, 58.5225
+        og_f = og_comp.astype(np.float64)
+        pr_f = pr_comp.astype(np.float64)
+        mu1 = cv2.GaussianBlur(og_f, (11, 11), 1.5)
+        mu2 = cv2.GaussianBlur(pr_f, (11, 11), 1.5)
+        sig1_sq = cv2.GaussianBlur(og_f ** 2, (11, 11), 1.5) - mu1 ** 2
+        sig2_sq = cv2.GaussianBlur(pr_f ** 2, (11, 11), 1.5) - mu2 ** 2
+        sig12 = cv2.GaussianBlur(og_f * pr_f, (11, 11), 1.5) - mu1 * mu2
+        ssim_map = ((2 * mu1 * mu2 + C1) * (2 * sig12 + C2)) / \
+                   ((mu1 ** 2 + mu2 ** 2 + C1) * (sig1_sq + sig2_sq + C2))
+        ssim_val = float(ssim_map.mean())
 
         # ---- Metric 3: Edge overlap ----
-        og_edges = cv2.Canny(og_zone, 30, 80)
-        pr_edges = cv2.Canny(pr_zone_adj, 30, 80)
-        og_e_valid = og_edges[valid]
-        pr_e_valid = pr_edges[valid]
-        og_edge_px = (og_e_valid > 0).sum()
+        og_edges = cv2.Canny(og_comp, 30, 80)
+        pr_edges = cv2.Canny(pr_comp, 30, 80)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        pr_edges_d = cv2.dilate(pr_edges, kernel, iterations=1)
+        og_edge_px = (og_edges > 0).sum()
         if og_edge_px > 0:
-            overlap = ((og_e_valid > 0) & (pr_e_valid > 0)).sum()
+            overlap = ((og_edges > 0) & (pr_edges_d > 0)).sum()
             edge_overlap = float(overlap / og_edge_px)
         else:
             edge_overlap = 0.0
 
-        # ---- Metric 4: Tight-zone anomaly (defect-specific) ----
-        # Compare pixel distribution in the tight defect box
-        tight_og = og_zone[max(0,y1-ey1):min(ey2-ey1,y2-ey1),
-                           max(0,x1-ex1):min(ex2-ex1,x2-ex1)]
-        tight_pr = pr_zone_adj[max(0,y1-ey1):min(ey2-ey1,y2-ey1),
-                               max(0,x1-ex1):min(ex2-ex1,x2-ex1)]
-        if tight_og.size > 4 and tight_pr.size > 4:
-            # Check if tight zone has distinct features relative to surround
-            og_tight_std = float(tight_og.std())
-            pr_tight_std = float(tight_pr.std())
-            # Normalize both and compute correlation
-            og_t = (tight_og.astype(float) - tight_og.mean()) / (og_tight_std + 1e-6)
-            pr_t = (tight_pr.astype(float) - tight_pr.mean()) / (pr_tight_std + 1e-6)
-            if og_t.size == pr_t.size:
-                tight_corr = float(np.corrcoef(og_t.ravel(), pr_t.ravel())[0, 1])
-            else:
-                tight_corr = 0.0
+        # ---- Metric 4: Tight defect zone correlation ----
+        if is_thin:
+            expand = max(2, min_dd)
+        else:
+            expand = max(8, pad // 3)
+        dtx1 = max(0, tx1 - expand); dty1 = max(0, ty1 - expand)
+        dtx2 = min(ww, tx2 + expand); dty2 = min(wh, ty2 + expand)
+        tight_og = og_comp[dty1:dty2, dtx1:dtx2]
+        tight_pr = pr_comp[dty1:dty2, dtx1:dtx2]
+        if tight_og.size > 10 and tight_pr.size > 10 and tight_og.shape == tight_pr.shape:
+            og_t = tight_og.ravel().astype(float)
+            pr_t = tight_pr.ravel().astype(float)
+            og_t = (og_t - og_t.mean()) / (og_t.std() + 1e-6)
+            pr_t = (pr_t - pr_t.mean()) / (pr_t.std() + 1e-6)
+            tight_corr = float(np.corrcoef(og_t, pr_t)[0, 1])
         else:
             tight_corr = 0.0
-            og_tight_std = 0.0
-            pr_tight_std = 0.0
+
+        # ---- Metric 5: Line profile correlation (thin defects) ----
+        profile_corr = 0.0
+        if is_thin and defect_w > 0 and defect_h > 0:
+            if defect_w > defect_h:
+                # Horizontal thin defect — compare vertical intensity profiles
+                pmargin = max(min_dd * 4, 15)
+                pry1 = max(0, ty1 - pmargin)
+                pry2 = min(wh, ty2 + pmargin)
+                prx1, prx2 = max(0, tx1), min(ww, tx2)
+                if pry2 - pry1 > 5 and prx2 - prx1 > 5:
+                    og_prof = og_comp[pry1:pry2, prx1:prx2].mean(axis=1).astype(float)
+                    pr_prof = pr_comp[pry1:pry2, prx1:prx2].mean(axis=1).astype(float)
+                    if og_prof.std() > 1 and pr_prof.std() > 1:
+                        og_pn = (og_prof - og_prof.mean()) / (og_prof.std() + 1e-6)
+                        pr_pn = (pr_prof - pr_prof.mean()) / (pr_prof.std() + 1e-6)
+                        profile_corr = float(np.corrcoef(og_pn, pr_pn)[0, 1])
+            else:
+                # Vertical thin defect — compare horizontal intensity profiles
+                pmargin = max(min_dd * 4, 15)
+                prx1 = max(0, tx1 - pmargin)
+                prx2 = min(ww, tx2 + pmargin)
+                pry1, pry2 = max(0, ty1), min(wh, ty2)
+                if prx2 - prx1 > 5 and pry2 - pry1 > 5:
+                    og_prof = og_comp[pry1:pry2, prx1:prx2].mean(axis=0).astype(float)
+                    pr_prof = pr_comp[pry1:pry2, prx1:prx2].mean(axis=0).astype(float)
+                    if og_prof.std() > 1 and pr_prof.std() > 1:
+                        og_pn = (og_prof - og_prof.mean()) / (og_prof.std() + 1e-6)
+                        pr_pn = (pr_prof - pr_prof.mean()) / (pr_prof.std() + 1e-6)
+                        profile_corr = float(np.corrcoef(og_pn, pr_pn)[0, 1])
 
         metrics = {
-            "coverage": round(float(nonzero), 3),
+            "tmatch": round(tmatch_score, 3),
             "ncc": round(ncc_val, 3),
-            "grad_sim": round(grad_sim, 3),
+            "ssim": round(ssim_val, 3),
             "edge_overlap": round(edge_overlap, 3),
             "tight_corr": round(tight_corr, 3),
+            "profile_corr": round(profile_corr, 3),
+            "is_thin": is_thin,
             "inverted": was_inverted,
+            "refine_shift": f"({dx},{dy})",
         }
 
-        # ---- Decision logic ----
-        # Score combines: NCC (global match), gradient similarity (structural),
-        # edge overlap (feature match), and tight correlation (defect-specific)
-        score = 0.25 * max(ncc_val, 0) + 0.25 * grad_sim + 0.25 * edge_overlap + 0.25 * max(tight_corr, 0)
+        # Save debug: warped OG | process patch | diff
+        if outdir:
+            diff = cv2.absdiff(og_comp, pr_comp)
+            row = np.hstack([og_comp, pr_comp, diff])
+            scale = max(1, 300 // max(row.shape[0], 1))
+            if scale > 1:
+                row = cv2.resize(row, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
+            dbg_path = os.path.join(outdir, f"DBG_{filename.replace('.jpg', '')}_OG_vs_PROC.jpg")
+            cv2.imwrite(dbg_path, row)
 
-        if score > 0.45:
+        # ---- Decision logic ----
+        # Negative tight_corr = defect zone anti-correlates → penalize (not ignore)
+        tight_term_thin = 0.25 * tight_corr if tight_corr >= 0 else 0.10 * tight_corr
+        tight_term_norm = 0.25 * tight_corr if tight_corr >= 0 else 0.10 * tight_corr
+        if is_thin:
+            # For thin/line defects: reduce edge weight (dominated by IC structure),
+            # add profile correlation which captures the perpendicular defect signal
+            score = (0.20 * max(tmatch_score, 0) +
+                     0.15 * max(ssim_val, 0) +
+                     0.05 * edge_overlap +
+                     tight_term_thin +
+                     0.35 * max(profile_corr, 0))
+        else:
+            score = (0.30 * max(tmatch_score, 0) +
+                     0.25 * max(ssim_val, 0) +
+                     0.20 * edge_overlap +
+                     tight_term_norm)
+        # Patch-level inversion penalty: image-level contrast matching already
+        # handles legitimate OG/process inversion.  If a patch still needs
+        # inversion, it usually means the local warp is bad (artifacts create
+        # spurious correlation after inversion + brightness matching).
+        if was_inverted:
+            score *= 0.85
+        metrics["score"] = round(score, 3)
+
+        prof_str = f", profile={profile_corr:.2f}" if is_thin else ""
+        if score > 0.40:
             confidence = min(1.0, score)
             status = "PRESENT"
-            detail = (f"Defect zone structurally matches OG (score={score:.2f}, "
-                      f"NCC={ncc_val:.2f}, grad={grad_sim:.2f}, edge={edge_overlap:.2f}, "
-                      f"tight_corr={tight_corr:.2f})")
-        elif score < 0.20:
+            detail = (f"Defect matches (score={score:.2f}, "
+                      f"tmatch={tmatch_score:.2f}, ssim={ssim_val:.2f}, "
+                      f"edge={edge_overlap:.2f}, tight={tight_corr:.2f}{prof_str})")
+        elif score < 0.18:
             confidence = min(1.0, 1.0 - score)
             status = "ABSENT"
-            detail = (f"Defect zone differs from OG (score={score:.2f}, "
-                      f"NCC={ncc_val:.2f}, grad={grad_sim:.2f}, edge={edge_overlap:.2f})")
+            detail = (f"Defect zone differs (score={score:.2f}, "
+                      f"tmatch={tmatch_score:.2f}, ssim={ssim_val:.2f}, "
+                      f"edge={edge_overlap:.2f}{prof_str})")
         else:
             confidence = 0.3
             status = "INCONCLUSIVE"
-            detail = (f"Ambiguous match (score={score:.2f}, "
-                      f"NCC={ncc_val:.2f}, grad={grad_sim:.2f}, edge={edge_overlap:.2f}, "
-                      f"tight_corr={tight_corr:.2f})")
+            detail = (f"Ambiguous (score={score:.2f}, tmatch={tmatch_score:.2f}, "
+                      f"ssim={ssim_val:.2f}, edge={edge_overlap:.2f}, "
+                      f"tight={tight_corr:.2f}{prof_str})")
 
         return OriginVerdict(filename, status, confidence, detail, metrics)
 
@@ -423,6 +507,72 @@ def vstack_padded(imgs, target_w):
 
 
 # ============================================================
+# Image Preprocessing
+# ============================================================
+def normalize_contrast(img: np.ndarray, clip_limit=3.0, grid=(8, 8)) -> np.ndarray:
+    """Apply CLAHE to enhance contrast on a BGR image."""
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=grid)
+    l = clahe.apply(l)
+    return cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
+
+
+def enhance_process_image(img: np.ndarray, clip_limit=4.0, gamma=0.6) -> np.ndarray:
+    """Aggressively enhance a dark-field process image to reveal subtle features.
+    Pipeline: histogram stretch → gamma brighten → CLAHE → unsharp mask."""
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+
+    # 1. Histogram stretch: map [p2, p98] → [0, 255]
+    p2, p98 = np.percentile(l, (2, 98))
+    if p98 - p2 > 10:
+        l = np.clip((l.astype(float) - p2) / (p98 - p2) * 255, 0, 255).astype(np.uint8)
+
+    # 2. Gamma correction to brighten dark regions
+    lut = np.array([((i / 255.0) ** gamma) * 255 for i in range(256)], dtype=np.uint8)
+    l = cv2.LUT(l, lut)
+
+    # 3. CLAHE for local contrast
+    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
+    l = clahe.apply(l)
+
+    enhanced = cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
+
+    # 4. Unsharp mask to sharpen edges
+    blur = cv2.GaussianBlur(enhanced, (0, 0), sigmaX=2)
+    enhanced = cv2.addWeighted(enhanced, 1.5, blur, -0.5, 0)
+
+    return enhanced
+
+
+def auto_match_og_to_process(og: np.ndarray, proc_sample: np.ndarray) -> np.ndarray:
+    """If OG has inverted contrast relative to process images, invert it.
+    Then apply CLAHE to normalize both to a comparable range."""
+    og_gray = cv2.cvtColor(og, cv2.COLOR_BGR2GRAY)
+    pr_gray = cv2.cvtColor(proc_sample, cv2.COLOR_BGR2GRAY)
+
+    # Compare mean brightness — if OG is much brighter, it's likely inverted
+    og_mean = float(og_gray.mean())
+    pr_mean = float(pr_gray.mean())
+
+    # Also check correlation on a center crop
+    h, w = min(og_gray.shape[0], pr_gray.shape[0]), min(og_gray.shape[1], pr_gray.shape[1])
+    ch, cw = h // 4, w // 4
+    og_crop = cv2.resize(og_gray, (cw, ch))
+    pr_crop = cv2.resize(pr_gray, (cw, ch))
+    corr = np.corrcoef(og_crop.ravel().astype(float), pr_crop.ravel().astype(float))[0, 1]
+
+    inverted = False
+    if corr < -0.2 or (og_mean > 150 and pr_mean < 100) or (og_mean < 100 and pr_mean > 150):
+        og = cv2.bitwise_not(og)
+        inverted = True
+
+    og = enhance_process_image(og)
+    return og, inverted
+
+
+# ============================================================
 # Process Image Sorting
 # ============================================================
 def proc_sort_key(fname):
@@ -430,16 +580,16 @@ def proc_sort_key(fname):
     if m:
         num = int(m.group(1))
         is_out = m.group(2).lower() == 'out'
-        return (num, 1 if is_out else 0)
+        return (num, 0 if is_out else 1)
     return (0, 0)
 
-
+        
 # ============================================================
 # Main 
 # ============================================================
 def main():
-    uploads = './img'
-    outdir  = './img/output'
+    uploads = './U65E35A201073'
+    outdir  = './U65E35A201073/output'
     os.makedirs(outdir, exist_ok=True)
 
     # ---------- 1. Parse CSV ----------
@@ -481,22 +631,46 @@ def main():
             break
     if ref_key is None:
         ref_key = list(og_imgs.keys())[0]
-    ref_img = og_imgs[ref_key]
+    ref_img_raw = og_imgs[ref_key]
     print(f"\n  Primary reference frame: {ref_key}")
 
     proc_sorted = sorted(proc_imgs.keys(), key=proc_sort_key)
     print(f"  Process order: {proc_sorted}")
+
+    # ---------- 2b. Preprocess: match OG contrast to process images ----------
+    print("\n  Preprocessing: normalizing OG contrast to match process images...")
+    proc_sample = proc_imgs[proc_sorted[0]]
+    ref_img, og_was_inverted = auto_match_og_to_process(ref_img_raw, proc_sample)
+    print(f"  OG inverted: {og_was_inverted}")
+
+    # Enhanced images (aggressive) → for alignment (feature matching)
+    proc_imgs_enhanced = {}
+    for fname in proc_sorted:
+        proc_imgs_enhanced[fname] = enhance_process_image(proc_imgs[fname])
+
+    # Mild-normalized images → for origin comparison (preserve pixel fidelity)
+    # Same inversion + CLAHE only, matching what OG gets
+    ref_img_mild = ref_img  # already inverted + enhanced via auto_match
+    proc_imgs_mild = {}
+    for fname in proc_sorted:
+        proc_imgs_mild[fname] = normalize_contrast(proc_imgs[fname], clip_limit=3.0)
+    # Also make a mild OG for comparison (invert + CLAHE only, no gamma/sharpen)
+    ref_img_mild = cv2.bitwise_not(ref_img_raw) if og_was_inverted else ref_img_raw.copy()
+    ref_img_mild = normalize_contrast(ref_img_mild, clip_limit=3.0)
+
+    print(f"  Enhanced {len(proc_imgs_enhanced)} process images for alignment")
+    print(f"  Mild-normalized {len(proc_imgs_mild)} process images + OG for comparison")
 
     # ---------- 3. Align every process image to reference ----------
     print("\n" + "=" * 60)
     print("STEP 3: Aligning process images")
     print("=" * 60)
 
-    aligner = Aligner()
-    alignments: Dict[str, AlignResult] = {}
+    aligner = AxisAligner()
+    alignments: Dict[str, AxisAffine] = {}
 
     for fname in proc_sorted:
-        ar = aligner.align(ref_img, proc_imgs[fname])
+        ar = aligner.align(ref_img_raw, proc_imgs[fname])
         alignments[fname] = ar
         tag = "OK" if ar.ok else "FAIL"
         print(f"  {fname}: {tag}  method={ar.method}  inliers={ar.inliers}  p95_err={ar.reproj_p95:.2f}px  adaptive_pad={ar.adaptive_pad}px")
@@ -512,16 +686,9 @@ def main():
     for d in defects:
         print(f"\n  --- Defect: {d.dr_sub_item}  ctr=({d.box_ctr_x:.0f},{d.box_ctr_y:.0f}) ---")
 
-        # Find matching OG image for this defect
-        og_key = None
-        for k in og_imgs:
-            if d.dr_sub_item.replace('-','').replace('_','').upper() in k.replace('-','').replace('_','').upper():
-                og_key = k
-                break
-        if og_key is None:
-            og_key = ref_key
-            print(f"    No exact OG match → using {ref_key}")
-        og_img = og_imgs[og_key]
+        # Use mild-normalized OG for origin comparison (preserves pixel fidelity)
+        og_key = ref_key
+        og_img = ref_img_mild
         h_og, w_og = og_img.shape[:2]
 
         # Defect rect in OG pixel coords (tight)
@@ -537,7 +704,8 @@ def main():
 
         for fname in proc_sorted:
             ar = alignments[fname]
-            proc = proc_imgs[fname]
+            proc = proc_imgs[fname]            # raw for annotation drawing
+            proc_n = proc_imgs_mild[fname]   # mild-normalized for origin analysis
             ph, pw = proc.shape[:2]
 
             if not ar.ok or ar.inliers < 15:
@@ -568,13 +736,15 @@ def main():
                 annotated_imgs.append((fname, ann))
                 continue
 
-            # --- Origin analysis: warp process → OG space and compare ---
-            warped = aligner.warp_to_og(proc, og_img.shape, ar)
-            if warped is not None:
-                warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
-                v = detector.analyze(og_gray, warped_gray, og_rect, pad, fname)
+            # --- Origin analysis: compare in PROCESS space with local refinement ---
+            proc_center = aligner.map_point(d.center_pixel(w_og, h_og), ar)
+            if proc_center is not None:
+                proc_gray_n = cv2.cvtColor(proc_n, cv2.COLOR_BGR2GRAY)
+                v = detector.analyze_in_process_space(
+                    og_gray, proc_gray_n, og_rect, proc_center, pad,
+                    ar, fname, outdir=outdir)
             else:
-                v = OriginVerdict(fname, "INCONCLUSIVE", 0, "Warp failed", {})
+                v = OriginVerdict(fname, "INCONCLUSIVE", 0, "Center mapping failed", {})
             verdicts.append(v)
 
             # --- Annotate process image ---
@@ -603,17 +773,28 @@ def main():
 
         # --- Determine origin ---
         origin = "UNKNOWN"
-        # Traceback order: newest → oldest. Origin = first process image where defect appears.
-        # Process images are sorted oldest → newest, so we scan forward.
+        # Process images sorted newest → oldest (lower number = latest).
+        # Scan forward (newest → oldest); keep updating so origin ends up
+        # as the earliest (oldest) process step where defect is PRESENT.
         for v in verdicts:
             if v.status == "PRESENT":
                 origin = v.filename
-                break
+        if origin == "UNKNOWN":
+            # No clear PRESENT — check for significant score difference
+            # among INCONCLUSIVE verdicts to pick the most likely origin
+            valid = [v for v in verdicts if v.status not in ("ALIGN_FAIL", "OUT_OF_VIEW")]
+            if len(valid) >= 2:
+                scores = [v.metrics.get('score', 0) for v in valid]
+                max_score = max(scores)
+                max_idx = scores.index(max_score)
+                other_scores = [s for i, s in enumerate(scores) if i != max_idx]
+                avg_others = sum(other_scores) / len(other_scores) if other_scores else 0
+                if max_score > 0.25 and max_score > avg_others * 1.3:
+                    origin = valid[max_idx].filename
         if origin == "UNKNOWN":
             for v in verdicts:
                 if v.status == "INCONCLUSIVE":
                     origin = f"INCONCLUSIVE (possibly {v.filename})"
-                    break
         if origin == "UNKNOWN" and all(v.status == "ABSENT" for v in verdicts):
             origin = "DVI (defect first appears at final inspection)"
 
@@ -633,8 +814,8 @@ def main():
         cv2.arrowedLine(arrow, (45, THUMB_H//2), (5, THUMB_H//2), C_WHITE, 2, tipLength=0.25)
         panel_imgs.append(arrow)
 
-        # Process images in reverse (traceback direction)
-        for fname, ann in reversed(annotated_imgs):
+        # Process images in traceback order (newest → oldest, Out → In)
+        for fname, ann in annotated_imgs:
             panel_imgs.append(ann)
             arr = np.zeros((THUMB_H, 50, 3), dtype=np.uint8)
             cv2.arrowedLine(arr, (45, THUMB_H//2), (5, THUMB_H//2), C_WHITE, 2, tipLength=0.25)
@@ -661,20 +842,20 @@ def main():
     print("=" * 60)
     defects_by_og = defaultdict(list)
     for d in defects:
-        for k in og_imgs:
-            if d.dr_sub_item.replace('-','').replace('_','').upper() in k.replace('-','').replace('_','').upper():
-                defects_by_og[k].append(d)
-                break
+        # All defects use the reference OG image
+        defects_by_og[ref_key].append(d)
 
     og_annotated = {}
-    for k, img in og_imgs.items():
+    for k in og_imgs:
+        # Use mild-normalized ref for the reference key, raw for others
+        img = ref_img_mild if k == ref_key else og_imgs[k]
         ann = img.copy()
         h, w = ann.shape[:2]
         for dd in defects_by_og.get(k, []):
             rect = dd.to_pixel_rect(w, h)
             ann = draw_box(ann, rect, dd.dr_sub_item, pad=30)
         n = len(defects_by_og.get(k, []))
-        ann = banner(ann, f"OG: {k} | {n} defect(s)", C_RED if n else C_GREEN)
+        ann = banner(ann, f"OG: {k} | {n} defect(s){' [contrast-matched]' if k == ref_key else ''}", C_RED if n else C_GREEN)
         og_annotated[k] = ann
         cv2.imwrite(os.path.join(outdir, f"OG_{k}"), ann)
         print(f"  {k}: {n} defects")
@@ -684,21 +865,20 @@ def main():
     print("STEP 6: Quarantine zone close-ups")
     print("=" * 60)
     for d in defects:
-        for k, img in og_imgs.items():
-            if d.dr_sub_item.replace('-','').replace('_','').upper() in k.replace('-','').replace('_','').upper():
-                h, w = img.shape[:2]
-                rect = d.to_pixel_rect(w, h)
-                x1, y1, x2, y2 = rect
-                zp = 60
-                zx1 = max(0, x1-zp); zy1 = max(0, y1-zp)
-                zx2 = min(w, x2+zp); zy2 = min(h, y2+zp)
-                crop = img[zy1:zy2, zx1:zx2].copy()
-                cv2.rectangle(crop, (x1-zx1, y1-zy1), (x2-zx1, y2-zy1), C_RED, 2)
-                crop = cv2.resize(crop, None, fx=3, fy=3, interpolation=cv2.INTER_LANCZOS4)
-                zpath = os.path.join(outdir, f"ZONE_{d.dr_sub_item}_ctr{d.box_ctr_x:.0f}_{d.box_ctr_y:.0f}.jpg")
-                cv2.imwrite(zpath, crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                print(f"  {zpath}")
-                break
+        # Use the mild-normalized reference OG for quarantine zone close-ups
+        img = ref_img_mild
+        h, w = img.shape[:2]
+        rect = d.to_pixel_rect(w, h)
+        x1, y1, x2, y2 = rect
+        zp = 60
+        zx1 = max(0, x1-zp); zy1 = max(0, y1-zp)
+        zx2 = min(w, x2+zp); zy2 = min(h, y2+zp)
+        crop = img[zy1:zy2, zx1:zx2].copy()
+        cv2.rectangle(crop, (x1-zx1, y1-zy1), (x2-zx1, y2-zy1), C_RED, 2)
+        crop = cv2.resize(crop, None, fx=3, fy=3, interpolation=cv2.INTER_LANCZOS4)
+        zpath = os.path.join(outdir, f"ZONE_{d.dr_sub_item}_ctr{d.box_ctr_x:.0f}_{d.box_ctr_y:.0f}.jpg")
+        cv2.imwrite(zpath, crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        print(f"  {zpath}")
 
     # ---------- 7. Summary Report ----------
     print("\n" + "=" * 60)
@@ -787,7 +967,7 @@ def main():
                     f"size=({d.box_side_x:.0f} x {d.box_side_y:.0f})\n")
             f.write(f"  OG Image:  {d.og_frame}\n")
             f.write(f"  ORIGIN:    {origin}\n")
-            f.write(f"\n  Process-by-process verdicts (oldest → newest):\n")
+            f.write(f"\n  Process-by-process verdicts (newest → oldest):\n")
             for v in verdicts:
                 f.write(f"    {v.filename:20s}  {v.status:15s}  conf={v.confidence:.0%}  {v.detail}\n")
                 if v.metrics:

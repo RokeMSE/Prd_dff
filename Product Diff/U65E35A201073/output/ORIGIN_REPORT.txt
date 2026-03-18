@@ -1,0 +1,80 @@
+======================================================================
+DEFECT ORIGIN TRACEBACK REPORT
+======================================================================
+LOT:       X610N918
+VISUAL_ID: U65E35A201073
+Date:      2026-03-17 16:04:05
+Reference: X610N918_20260315_050901_TOP2D_T21_S13_P0_FRAME2_PP-MI90-T-MG-DR-00.jpg
+Process images (4): 6275_In.jpg, 6275_Out.jpg, 7820_In.jpg, 7820_Out.jpg
+
+----------------------------------------------------------------------
+DEFECT: PP-MI90-T-MG-DR-00
+  Location:  ctr=(297, 293)  size=(83 x 74)
+  OG Image:  X610N918_20260315_050901_TOP2D_T21_S13_P0_FRAME2_PP-MI90-T-MG-DR-00.JPG
+  ORIGIN:    UNKNOWN
+
+  Process-by-process verdicts (newest → oldest):
+    6275_In.jpg           OUT_OF_VIEW      conf=0%  Mapped box (-70,21)-(64,149) outside image (1972x4013)
+    6275_Out.jpg          OUT_OF_VIEW      conf=0%  Mapped box (-55,10)-(77,136) outside image (1972x4013)
+    7820_In.jpg           OUT_OF_VIEW      conf=0%  Mapped box (-82,-14)-(54,113) outside image (1972x4013)
+    7820_Out.jpg          OUT_OF_VIEW      conf=0%  Mapped box (-79,-7)-(56,119) outside image (1972x4013)
+
+----------------------------------------------------------------------
+DEFECT: PP-MI98-B-MG-DR-00
+  Location:  ctr=(2691, 320)  size=(49 x 50)
+  OG Image:  X610N918_20260315_050901_BOTTOM2D_T22_S14_P0_FRAME1_PP-MI98-B-MG-DR-00.JPG
+  ORIGIN:    7820_Out.jpg
+
+  Process-by-process verdicts (newest → oldest):
+    6275_In.jpg           INCONCLUSIVE     conf=30%  Ambiguous (score=0.38, tmatch=0.34, ssim=0.17, edge=0.92, tight=0.19)
+                          metrics: tmatch=0.336, ncc=0.341, ssim=0.175, edge_overlap=0.921, tight_corr=0.191, profile_corr=0.0, is_thin=False, inverted=False, refine_shift=(0,-11), score=0.376
+    6275_Out.jpg          INCONCLUSIVE     conf=30%  Ambiguous (score=0.39, tmatch=0.32, ssim=0.22, edge=0.90, tight=0.22)
+                          metrics: tmatch=0.321, ncc=0.286, ssim=0.221, edge_overlap=0.898, tight_corr=0.22, profile_corr=0.0, is_thin=False, inverted=False, refine_shift=(0,-12), score=0.386
+    7820_In.jpg           INCONCLUSIVE     conf=30%  Ambiguous (score=0.39, tmatch=0.49, ssim=0.36, edge=0.84, tight=-0.17)
+                          metrics: tmatch=0.486, ncc=0.457, ssim=0.363, edge_overlap=0.842, tight_corr=-0.165, profile_corr=0.0, is_thin=False, inverted=False, refine_shift=(-8,-14), score=0.388
+    7820_Out.jpg          PRESENT          conf=41%  Defect matches (score=0.41, tmatch=0.51, ssim=0.37, edge=0.87, tight=-0.12)
+                          metrics: tmatch=0.507, ncc=0.492, ssim=0.373, edge_overlap=0.873, tight_corr=-0.116, profile_corr=0.0, is_thin=False, inverted=False, refine_shift=(-2,-14), score=0.408
+
+----------------------------------------------------------------------
+DEFECT: SI-E-SUB-T-MI03-SCPM1-00
+  Location:  ctr=(1040, 4109)  size=(227 x 99)
+  OG Image:  X610N918_20260315_050901_TOP2D_T21_S13_P0_FRAME8_SI-E-SUB-T-MI03-SCPM1-00.JPG
+  ORIGIN:    INCONCLUSIVE (possibly 7820_Out.jpg)
+
+  Process-by-process verdicts (newest → oldest):
+    6275_In.jpg           INCONCLUSIVE     conf=30%  Ambiguous (score=0.26, tmatch=0.14, ssim=0.17, edge=0.95, tight=-0.16)
+                          metrics: tmatch=0.139, ncc=-0.146, ssim=0.167, edge_overlap=0.948, tight_corr=-0.162, profile_corr=0.0, is_thin=False, inverted=False, refine_shift=(0,-1), score=0.257
+    6275_Out.jpg          INCONCLUSIVE     conf=30%  Ambiguous (score=0.25, tmatch=0.13, ssim=0.15, edge=0.93, tight=-0.13)
+                          metrics: tmatch=0.13, ncc=-0.152, ssim=0.151, edge_overlap=0.925, tight_corr=-0.134, profile_corr=0.0, is_thin=False, inverted=False, refine_shift=(-14,0), score=0.248
+    7820_In.jpg           INCONCLUSIVE     conf=30%  Ambiguous (score=0.22, tmatch=0.19, ssim=0.19, edge=0.70, tight=-0.23)
+                          metrics: tmatch=0.194, ncc=-0.217, ssim=0.194, edge_overlap=0.696, tight_corr=-0.232, profile_corr=0.0, is_thin=False, inverted=False, refine_shift=(4,2), score=0.223
+    7820_Out.jpg          INCONCLUSIVE     conf=30%  Ambiguous (score=0.23, tmatch=0.17, ssim=0.19, edge=0.72, tight=-0.18)
+                          metrics: tmatch=0.174, ncc=-0.194, ssim=0.192, edge_overlap=0.717, tight_corr=-0.183, profile_corr=0.0, is_thin=False, inverted=False, refine_shift=(1,0), score=0.225
+
+----------------------------------------------------------------------
+DEFECT: SI-E-SUB-T-MI03-SCPM1-00
+  Location:  ctr=(1501, 3934)  size=(235 x 56)
+  OG Image:  X610N918_20260315_050901_TOP2D_T21_S13_P0_FRAME8_SI-E-SUB-T-MI03-SCPM1-00.JPG
+  ORIGIN:    INCONCLUSIVE (possibly 7820_Out.jpg)
+
+  Process-by-process verdicts (newest → oldest):
+    6275_In.jpg           INCONCLUSIVE     conf=30%  Ambiguous (score=0.35, tmatch=0.16, ssim=0.27, edge=0.95, tight=0.19)
+                          metrics: tmatch=0.155, ncc=0.126, ssim=0.269, edge_overlap=0.951, tight_corr=0.191, profile_corr=0.0, is_thin=False, inverted=False, refine_shift=(7,-4), score=0.352
+    6275_Out.jpg          INCONCLUSIVE     conf=30%  Ambiguous (score=0.39, tmatch=0.21, ssim=0.29, edge=0.94, tight=0.27)
+                          metrics: tmatch=0.207, ncc=0.184, ssim=0.286, edge_overlap=0.943, tight_corr=0.27, profile_corr=0.0, is_thin=False, inverted=False, refine_shift=(4,-3), score=0.39
+    7820_In.jpg           INCONCLUSIVE     conf=30%  Ambiguous (score=0.34, tmatch=0.28, ssim=0.33, edge=0.73, tight=0.36)
+                          metrics: tmatch=0.278, ncc=0.305, ssim=0.33, edge_overlap=0.727, tight_corr=0.357, profile_corr=0.0, is_thin=False, inverted=True, refine_shift=(1,12), score=0.34
+    7820_Out.jpg          INCONCLUSIVE     conf=30%  Ambiguous (score=0.37, tmatch=0.22, ssim=0.30, edge=0.82, tight=0.25)
+                          metrics: tmatch=0.22, ncc=0.209, ssim=0.297, edge_overlap=0.816, tight_corr=0.251, profile_corr=0.0, is_thin=False, inverted=False, refine_shift=(6,-4), score=0.366
+
+======================================================================
+LEGEND:
+  PRESENT      — Defect zone matches OG pattern → defect likely exists at this step
+  ABSENT       — Defect zone differs from OG → defect likely not yet introduced
+  INCONCLUSIVE — Cannot determine with confidence
+  OUT_OF_VIEW  — Defect zone is outside the process image's field of view
+  ALIGN_FAIL   — Could not align process image to reference
+
+  ORIGIN = earliest process image where defect is determined PRESENT.
+  If all ABSENT → defect introduced at DVI/final inspection.
+======================================================================
