@@ -704,7 +704,7 @@ def auto_match_og_to_process(og: np.ndarray, proc_sample: np.ndarray) -> np.ndar
 # Process Image Sorting
 # ============================================================
 def proc_sort_key(fname):
-    m = re.match(r'(\d+)_(In|Out)', fname, re.IGNORECASE)
+    m = re.search(r'(\d+)_(In|Out)', fname, re.IGNORECASE)
     if m:
         num = int(m.group(1))
         is_out = m.group(2).lower() == 'out'
@@ -716,8 +716,8 @@ def proc_sort_key(fname):
 # Main 
 # ============================================================
 def main():
-    uploads = './U65E35A201073'
-    outdir  = './U65E35A201073/output'
+    uploads = './U6P22X1603318'
+    outdir  = './U6P22X1603318/output'
     os.makedirs(outdir, exist_ok=True)
 
     # ---------- 1. Parse CSV ----------
@@ -736,7 +736,7 @@ def main():
     og_imgs = {}   # filename → ndarray
     proc_imgs = {}
     og_pat  = re.compile(r'X\w+_\d+_\d+_.*FRAME\d+.*\.(jpg|jpeg|png)', re.IGNORECASE)
-    proc_pat = re.compile(r'\d+_(In|Out)\.(jpg|jpeg|png)', re.IGNORECASE)
+    proc_pat = re.compile(r'(?:\w+_)?\d+_(In|Out)\.(jpg|jpeg|png)', re.IGNORECASE)
 
     for f in sorted(os.listdir(uploads)):
         path = os.path.join(uploads, f)

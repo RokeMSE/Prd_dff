@@ -13,7 +13,7 @@ Pipeline:
 6. VLM determines per-image PRESENT / ABSENT / INCONCLUSIVE + origin
 7. Generates visual traceback report with VLM-based origin callout
 
-Supports: Gemini, OpenAI, Ollama (via .env configuration)
+Supports: Gemini, OpenAI, Azure OpenAI, Ollama (via .env configuration)
 """
 
 import cv2
@@ -65,6 +65,7 @@ C_BLACK   = (0, 0, 0)
 # VLM patch context: how much extra padding around the defect zone
 # to include in the image sent to the VLM (in process-space pixels)
 VLM_CONTEXT_PAD = 60
+VLM_BATCH_LIMIT = 50   # max images per VLM request (incl. OG reference)
 
 # ============================================================
 # VLM Service Layer (multi-provider)
@@ -136,6 +137,42 @@ class OpenAIVLM(VLMService):
             return f"ERROR: {e}"
 
 
+class AzureOpenAIVLM(VLMService):
+    def __init__(self, api_key: str, azure_endpoint: str,
+                 model_name: str = "gpt-4o",
+                 api_version: str = "2024-12-01-preview"):
+        from openai import AzureOpenAI
+        self.client = AzureOpenAI(
+            api_key=api_key,
+            azure_endpoint=azure_endpoint,
+            api_version=api_version,
+        )
+        self.model_name = model_name
+
+    def _pil_to_b64(self, img) -> str:
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}"
+
+    def analyze_images(self, images: list, prompt: str) -> str:
+        content = [{"type": "text", "text": prompt}]
+        for img in images:
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": self._pil_to_b64(img), "detail": "high"}
+            })
+        try:
+            resp = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[{"role": "user", "content": content}],
+                temperature=0.2,
+            )
+            return resp.choices[0].message.content
+        except Exception as e:
+            log.error(f"Azure OpenAI VLM error: {e}")
+            return f"ERROR: {e}"
+
+
 class OllamaVLM(VLMService):
     def __init__(self, model_name: str = "qwen3-vl:4b"):
         import ollama as _ollama
@@ -186,6 +223,13 @@ def create_vlm_service() -> VLMService:
             api_key=os.getenv("OPENAI_API_KEY", ""),
             model_name=os.getenv("OPENAI_MODEL", "gpt-4o"),
             base_url=os.getenv("OPENAI_ENDPOINT"),
+        )
+    elif provider == "azure":
+        return AzureOpenAIVLM(
+            api_key=os.getenv("OPENAI_API_KEY", ""),
+            azure_endpoint=os.getenv("OPENAI_ENDPOINT", ""),
+            model_name=os.getenv("OPENAI_MODEL", "gpt-4o"),
+            api_version=os.getenv("OPENAI_API_VERSION", "2024-12-01-preview"),
         )
     elif provider == "ollama":
         return OllamaVLM(
@@ -339,7 +383,12 @@ class VLMOriginDetector:
                           proc_zones: List[Dict], defect_info: str,
                           outdir: Optional[str] = None,
                           defect_id: str = "") -> Tuple[List[OriginVerdict], str]:
-        """Send OG crop + all process crops in one VLM call.
+        """Send OG crop + all process crops to VLM, batching if needed.
+
+        If there are more process zones than fit in a single VLM request
+        (VLM_BATCH_LIMIT - 1 for the OG slot), the zones are split into
+        chunks and each chunk is sent as a separate request.  Results are
+        merged and the overall origin is determined from all verdicts.
 
         Args:
             og_img:      Full OG image (BGR, contrast-matched)
@@ -354,6 +403,62 @@ class VLMOriginDetector:
         Returns:
             (verdicts, origin_filename)
         """
+        max_proc_per_batch = VLM_BATCH_LIMIT - 1  # 1 slot reserved for OG
+
+        # Single batch — no splitting needed
+        if len(proc_zones) <= max_proc_per_batch:
+            return self._analyze_single_batch(
+                og_img, og_rect, proc_zones, defect_info, outdir, defect_id)
+
+        # Multiple batches required
+        all_verdicts = []
+        batch_origins = []
+        n_batches = (len(proc_zones) + max_proc_per_batch - 1) // max_proc_per_batch
+
+        for batch_idx in range(0, len(proc_zones), max_proc_per_batch):
+            chunk = proc_zones[batch_idx:batch_idx + max_proc_per_batch]
+            batch_num = batch_idx // max_proc_per_batch + 1
+            log.info(f"  VLM batch {batch_num}/{n_batches}: "
+                     f"images {batch_idx + 1}–{batch_idx + len(chunk)} of {len(proc_zones)}")
+            verdicts, origin = self._analyze_single_batch(
+                og_img, og_rect, chunk, defect_info, outdir, defect_id)
+            all_verdicts.extend(verdicts)
+            batch_origins.append(origin)
+
+        # Determine overall origin across batches
+        origin = self._resolve_batched_origin(all_verdicts, batch_origins, proc_zones)
+        return all_verdicts, origin
+
+    def _resolve_batched_origin(self, all_verdicts: List[OriginVerdict],
+                                batch_origins: List[str],
+                                proc_zones: List[Dict]) -> str:
+        """Pick the true origin from multi-batch results.
+
+        proc_zones is ordered newest → oldest, so the last PRESENT image
+        in that order is the earliest process step where the defect exists.
+        """
+        proc_order = [pz['filename'] for pz in proc_zones]
+        present_fnames = {v.filename for v in all_verdicts if v.status == "PRESENT"}
+
+        # Walk newest→oldest; the last PRESENT is the true origin
+        last_present = None
+        for fname in proc_order:
+            if fname in present_fnames:
+                last_present = fname
+
+        if last_present:
+            return last_present
+
+        # No PRESENT found in any batch
+        if all(o == "DVI" for o in batch_origins):
+            return "DVI"
+        return "UNKNOWN"
+
+    def _analyze_single_batch(self, og_img: np.ndarray, og_rect: Tuple[int, int, int, int],
+                              proc_zones: List[Dict], defect_info: str,
+                              outdir: Optional[str] = None,
+                              defect_id: str = "") -> Tuple[List[OriginVerdict], str]:
+        """Send OG crop + one batch of process crops in a single VLM call."""
         # Crop OG zone
         og_zone = self._extract_zone(og_img, og_rect, context_pad=VLM_CONTEXT_PAD)
         og_origin = (max(0, og_rect[0] - VLM_CONTEXT_PAD),
@@ -387,10 +492,14 @@ class VLMOriginDetector:
 - **Image 0 (first image)**: OG reference where the defect is confirmed PRESENT. The red bounding box marks the defect.
 - **Images 1–{len(proc_zones)}**: Process step crops of the same spatial zone, ordered from latest to earliest:
 {filenames_str}
-- Process filenames follow the pattern `<step_number>_In.jpg` (before step) and `<step_number>_Out.jpg` (after step). Higher step numbers are later in the process.
+- Process filenames follow the pattern `<ID>_<step_number>_In.jpg` (before step) and `<ID>_<step_number>_Out.jpg` (after step). Higher step numbers are earlier in the process, higher ID numbers are later in the steps sequence.
 
 ## What to do
-- Given these images, help me find which picture is the origin of the defect (similar to the image on the leftmost column on every pic), give me the name of that picture.
+- Given these images, help me find which picture is the origin of the defect going from the OG reference.
+- Take into consideration that the defect shape, size might change compare to the OG reference but it should still be in the box and be similar enough. 
+- ALWAYS try to traceback at far as possible in the process line. Take extra in determining if there're any defects visible.
+- Defects can be numorous things: stains, dent, scratches, etc.
+Give me the name of that picture (filename) where the defect first appears, include all `<ID>_<step_number>_In|Out.jpg` in the name.
 
 ## Response format — respond with ONLY this JSON, no other text:
 {{
@@ -399,7 +508,7 @@ class VLMOriginDetector:
         ...
     ],
     "origin": "<filename where defect first appears, or 'DVI' if absent in all>",
-    "reasoning": "Brief explanation of how you traced the defect origin"
+    "reasoning": "Brief explanation of how you traced the defect origin, make remarks if there're any changes in the defects over time."
 }}"""
 
         log.info(f"  VLM batch analyzing {len(proc_zones)} process crops for defect {defect_id}...")
@@ -572,7 +681,7 @@ def auto_match_og_to_process(og: np.ndarray, proc_sample: np.ndarray):
 
 
 def proc_sort_key(fname):
-    m = re.match(r'(\d+)_(In|Out)', fname, re.IGNORECASE)
+    m = re.search(r'(\d+)_(In|Out)', fname, re.IGNORECASE)
     if m:
         num = int(m.group(1))
         is_out = m.group(2).lower() == 'out'
@@ -581,11 +690,11 @@ def proc_sort_key(fname):
 
 
 # ============================================================
-# Main Pipeline
+# Main
 # ============================================================
 def main():
-    uploads = './U65E35A201073'
-    outdir  = './U65E35A201073/output'
+    uploads = './U6P22X1603318'
+    outdir  = './U6P22X1603318/output'
     os.makedirs(outdir, exist_ok=True)
 
     # ---------- 0. Initialize VLM ----------
@@ -613,7 +722,7 @@ def main():
     og_imgs = {}
     proc_imgs = {}
     og_pat  = re.compile(r'X\w+_\d+_\d+_.*FRAME\d+.*\.(jpg|jpeg|png)', re.IGNORECASE)
-    proc_pat = re.compile(r'\d+_(In|Out)\.(jpg|jpeg|png)', re.IGNORECASE)
+    proc_pat = re.compile(r'(?:\w+_)?\d+_(In|Out)\.(jpg|jpeg|png)', re.IGNORECASE)
 
     for f in sorted(os.listdir(uploads)):
         path = os.path.join(uploads, f)
@@ -835,7 +944,7 @@ def main():
         ppath = os.path.join(outdir, f"PANEL_{d.dr_sub_item}_ctr{int(d.box_ctr_x)}_{int(d.box_ctr_y)}.jpg")
         cv2.imwrite(ppath, panel, [cv2.IMWRITE_JPEG_QUALITY, 95])
 
-        all_results.append((d, verdicts, origin, ppath))
+        all_results.append((d, verdicts, origin, panel))
 
     # ---------- 5. Annotated OG images ----------
     print("\n" + "=" * 60)
@@ -929,8 +1038,7 @@ def main():
     sections.append(tbl)
     sections.append(sep.copy())
 
-    for d, verdicts, origin, ppath in all_results:
-        panel = cv2.imread(ppath)
+    for d, verdicts, origin, panel in all_results:
         if panel is not None:
             if panel.shape[1] > W:
                 s = W / panel.shape[1]

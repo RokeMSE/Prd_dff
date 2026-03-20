@@ -1,5 +1,5 @@
 """
-Alignment Validation — axis-aligned affine aligner for OG ↔ process images
+Alignment Validation — axis-aligned affine aligner for OG <-> process images
 ===========================================================================
 Key assumptions (verified via manual alignment):
   - Same orientation in all images (no flip / rotation needed)
@@ -14,7 +14,7 @@ Algorithm:
   1. Detect & mask black-border FOV regions so features come from real content
   2. Enhance contrast aggressively to reveal structural landmarks
   3. Handle contrast inversion (auto-detect + test both polarities)
-  4. Feature matching (SIFT / AKAZE / ORB) → fit axis-aligned affine via RANSAC
+  4. Feature matching (SIFT / AKAZE / ORB) -> fit axis-aligned affine via RANSAC
      Model: x' = sx·x + tx,  y' = sy·y + ty   (4 free parameters)
   5. Use image-size ratio as sanity prior on (sx, sy)
   6. Generate visual diagnostics (checkerboard, overlay, side-by-side)
@@ -35,8 +35,6 @@ import re
 import argparse
 from dataclasses import dataclass
 from typing import Optional, Tuple, Dict
-
-
 
 # Data Classes
 @dataclass
@@ -61,7 +59,6 @@ class AxisAffine:
         return int(30 + 5.0 * self.reproj_p95)
 
     # ---- point / rect mapping (OG → process) ----
-
     def forward_pt(self, x: float, y: float) -> Tuple[float, float]:
         return (self.sx * x + self.tx, self.sy * y + self.ty)
 
@@ -83,7 +80,6 @@ class AxisAffine:
         )
 
     # ---- matrix forms ----
-
     def to_2x3(self) -> np.ndarray:
         """For cv2.warpAffine."""
         return np.array([
@@ -100,7 +96,6 @@ class AxisAffine:
         ], dtype=np.float64)
 
     # ---- compatibility aliases (match AlignResult in defect_traceback.py) ----
-
     @property
     def H(self) -> np.ndarray:
         return self.to_3x3()
@@ -180,9 +175,7 @@ def enhance_for_alignment(gray: np.ndarray, clip_limit: float = 6.0) -> np.ndarr
     return out
 
 
-
 # RANSAC axis-aligned affine fitter
-
 def _fit_from_two(src: np.ndarray, dst: np.ndarray,
                   i: int, j: int) -> Optional[Tuple[float, float, float, float]]:
     """Solve (sx, sy, tx, ty) exactly from two point pairs."""
@@ -293,7 +286,6 @@ class AxisAligner:
     Uses axis-aligned affine (4 params) instead of full homography (8 params).
     More robust because fewer degrees of freedom — rotation / shear are not needed.
     """
-
     def __init__(self, n_feat: int = 5000, ratio: float = 0.75,
                  ransac_thresh: float = 5.0):
         self.n_feat = n_feat
@@ -301,7 +293,6 @@ class AxisAligner:
         self.ransac_thresh = ransac_thresh
 
     # ---- internal helpers ----
-
     @staticmethod
     def _downscale(gray, max_dim=1500):
         """Downscale for faster feature detection; return (scaled, factor)."""
