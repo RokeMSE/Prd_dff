@@ -14,7 +14,11 @@ Algorithm:
   1. Detect & mask black-border FOV regions so features come from real content
   2. Enhance contrast aggressively to reveal structural landmarks
   3. Handle contrast inversion (auto-detect + test both polarities)
-  4. Feature matching (SIFT / AKAZE / ORB) -> fit axis-aligned affine via RANSAC
+  4. Feature matching (SIFT / AKAZE / ORB) -> fit axis-aligned affine via RANSAC 
+  (NOTE: RANSAC is used to mitigate the influence of outliers, since all the images are SO noisy 
+  and have many non-overlapping features. The axis-aligned affine model is chosen for its robustness, 
+  as it has fewer degrees of freedom compared to a full homography, and the assumptions about the 
+  images suggest that rotation/shear are not needed.)
      Model: x' = sx·x + tx,  y' = sy·y + ty   (4 free parameters)
   5. Use image-size ratio as sanity prior on (sx, sy)
   6. Generate visual diagnostics (checkerboard, overlay, side-by-side)
@@ -27,7 +31,6 @@ Usage — as module:
   aligner = AxisAligner()
   affine  = aligner.align(og_bgr, proc_bgr)
 """
-
 import cv2
 import numpy as np
 import os
@@ -104,7 +107,6 @@ class AxisAffine:
     def H_inv(self) -> Optional[np.ndarray]:
         inv = self.inverse()
         return inv.to_3x3() if inv else None
-
 
 
 # Preprocessing
@@ -193,7 +195,7 @@ def fit_axis_affine_ransac(
     src_pts: np.ndarray,
     dst_pts: np.ndarray,
     threshold: float = 5.0,
-    max_iter: int = 3000,
+    max_iter: int = 1000,
     scale_prior: Optional[Tuple[float, float]] = None,
     scale_tolerance: float = 0.35,
 ) -> Optional[AxisAffine]:
@@ -278,7 +280,6 @@ def fit_axis_affine_ransac(
     )
 
 
-
 # Feature Matching + Axis-Aligned Aligner
 class AxisAligner:
     """Drop-in replacement for Aligner in defect_traceback.py.
@@ -286,7 +287,7 @@ class AxisAligner:
     Uses axis-aligned affine (4 params) instead of full homography (8 params).
     More robust because fewer degrees of freedom — rotation / shear are not needed.
     """
-    def __init__(self, n_feat: int = 5000, ratio: float = 0.75,
+    def __init__(self, n_feat: int = 2000, ratio: float = 0.75,
                  ransac_thresh: float = 5.0):
         self.n_feat = n_feat
         self.ratio = ratio
@@ -344,7 +345,7 @@ class AxisAligner:
     # ---- public API ----
     def align(self, og: np.ndarray, proc: np.ndarray,
               verbose: bool = False) -> AxisAffine:
-        """Align OG → process. Returns AxisAffine.
+        """Align OG -> process. Returns AxisAffine.
 
         Automatically handles:
           - Contrast inversion (tests both polarities)
@@ -370,28 +371,16 @@ class AxisAligner:
         g1_enh = enhance_for_alignment(g1)
         g2_enh = enhance_for_alignment(g2)
         g1_inv = cv2.bitwise_not(g1)
-        g1_inv_enh = enhance_for_alignment(g1_inv)
 
         # Detectors
         sift = cv2.SIFT_create(nfeatures=self.n_feat)
         akaze = cv2.AKAZE_create()
-        orb = cv2.ORB_create(nfeatures=self.n_feat,
-                             scoreType=cv2.ORB_HARRIS_SCORE)
 
         strategies = [
             # (name,              img1,        img2,   detector, norm,             clahe)
-            ("SIFT+enh+inv",      g1_inv_enh,  g2_enh, sift,  cv2.NORM_L2,      False),
-            ("SIFT+enh",          g1_enh,      g2_enh, sift,  cv2.NORM_L2,      False),
-            ("SIFT+CLAHE+inv",    g1_inv,      g2,     sift,  cv2.NORM_L2,      True),
             ("SIFT+CLAHE",        g1,          g2,     sift,  cv2.NORM_L2,      True),
-            ("AKAZE+enh+inv",     g1_inv_enh,  g2_enh, akaze, cv2.NORM_HAMMING, False),
+            ("SIFT+CLAHE+inv",    g1_inv,      g2,     sift,  cv2.NORM_L2,      True),
             ("AKAZE+enh",         g1_enh,      g2_enh, akaze, cv2.NORM_HAMMING, False),
-            ("AKAZE+CLAHE+inv",   g1_inv,      g2,     akaze, cv2.NORM_HAMMING, True),
-            ("AKAZE+CLAHE",       g1,          g2,     akaze, cv2.NORM_HAMMING, True),
-            ("ORB+enh+inv",       g1_inv_enh,  g2_enh, orb,   cv2.NORM_HAMMING, False),
-            ("ORB+enh",           g1_enh,      g2_enh, orb,   cv2.NORM_HAMMING, False),
-            ("ORB+CLAHE+inv",     g1_inv,      g2,     orb,   cv2.NORM_HAMMING, True),
-            ("ORB+CLAHE",         g1,          g2,     orb,   cv2.NORM_HAMMING, True),
         ]
 
         best: Optional[AxisAffine] = None
@@ -557,9 +546,7 @@ def draw_diagnostics(og: np.ndarray, proc: np.ndarray,
     return paths
 
 
-
 # Structural landmark detection — package rectangle
-
 
 def find_package_rect(gray: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
     """Detect the outer package rectangle as (x1, y1, x2, y2).
@@ -657,12 +644,10 @@ def validate_with_landmarks(og_gray: np.ndarray, proc_gray: np.ndarray,
 
 
 # Top-level API
-
-
 def validate_alignment(og_path: str, proc_path: str,
                        outdir: Optional[str] = None,
                        verbose: bool = True) -> AxisAffine:
-    """Align one OG ↔ process pair with full diagnostics."""
+    """Align one OG <-> process pair with full diagnostics."""
     og = cv2.imread(og_path)
     proc = cv2.imread(proc_path)
     if og is None:
@@ -775,9 +760,7 @@ def validate_all(og_path: str, proc_dir: str,
     return results
 
 
-
 # CLI (for when using separately just for aligning images)
-
 def main():
     parser = argparse.ArgumentParser(
         description="Axis-aligned alignment validation for OG <-> process images")

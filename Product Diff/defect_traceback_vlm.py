@@ -256,20 +256,28 @@ class DefectBox:
     m_pos_x: float
     m_pos_y: float
     og_frame: str = ""
+    coord_space: str = "DVI"  # "DVI" = 3000x5500 normalized, "PIXEL" = raw image pixels
 
     def __post_init__(self):
         self.og_frame = os.path.basename(self.image_path)
 
     def to_pixel_rect(self, img_w: int, img_h: int) -> Tuple[int, int, int, int]:
-        sx = img_w / ORIG_WIDTH
-        sy = img_h / ORIG_HEIGHT
-        cx = self.box_ctr_x * sx
-        cy = self.box_ctr_y * sy
-        hw = max(self.box_side_x * sx / 2, 1)
-        hh = max(self.box_side_y * sy / 2, 1)
+        if self.coord_space == "PIXEL":
+            cx, cy = self.box_ctr_x, self.box_ctr_y
+            hw = max(self.box_side_x / 2, 1)
+            hh = max(self.box_side_y / 2, 1)
+        else:
+            sx = img_w / ORIG_WIDTH
+            sy = img_h / ORIG_HEIGHT
+            cx = self.box_ctr_x * sx
+            cy = self.box_ctr_y * sy
+            hw = max(self.box_side_x * sx / 2, 1)
+            hh = max(self.box_side_y * sy / 2, 1)
         return (int(cx - hw), int(cy - hh), int(cx + hw), int(cy + hh))
 
     def center_pixel(self, img_w: int, img_h: int) -> Tuple[int, int]:
+        if self.coord_space == "PIXEL":
+            return (int(self.box_ctr_x), int(self.box_ctr_y))
         sx = img_w / ORIG_WIDTH
         sy = img_h / ORIG_HEIGHT
         return (int(self.box_ctr_x * sx), int(self.box_ctr_y * sy))
@@ -290,8 +298,10 @@ class OriginVerdict:
 def parse_csv(path: str) -> List[DefectBox]:
     df = pd.read_csv(path)
     df.columns = df.columns.str.strip()
+    has_coord_space = 'COORD_SPACE' in df.columns
     boxes = []
     for _, r in df.iterrows():
+        coord_space = str(r.get('COORD_SPACE', 'DVI')).strip().upper() if has_coord_space else 'DVI'
         boxes.append(DefectBox(
             lot=str(r['LOT']).strip(),
             visual_id=str(r['VISUAL_ID']).strip(),
@@ -302,8 +312,9 @@ def parse_csv(path: str) -> List[DefectBox]:
             box_side_x=float(r['BOX_SIDE_X']),
             box_side_y=float(r['BOX_SIDE_Y']),
             image_path=str(r['IMAGE_FULL_PATH']).strip(),
-            m_pos_x=float(r['M_POSITION_X']),
-            m_pos_y=float(r['M_POSITION_Y']),
+            m_pos_x=float(r.get('M_POSITION_X', 0)),
+            m_pos_y=float(r.get('M_POSITION_Y', 0)),
+            coord_space=coord_space,
         ))
     return boxes
 
@@ -485,21 +496,38 @@ class VLMOriginDetector:
 
         filenames_str = "\n".join(image_listing)
 
-        prompt = f"""You are a semiconductor defect inspection expert. You are given cropped defect zone images from a manufacturing process timeline.
+        prompt = f"""You are a semiconductor defect inspection expert performing defect origin traceback.
 
-## Context
-- **Defect type**: {defect_info}
-- **Image 0 (first image)**: OG reference where the defect is confirmed PRESENT. The red bounding box marks the defect.
+## Task
+Determine in which process step a defect first appeared by examining cropped images of the same spatial zone across the manufacturing timeline.
+
+## Images provided
+- **Image 0 (OG reference)**: Final inspection image where the defect is CONFIRMED PRESENT. A **red bounding box** marks the exact defect. Study this carefully — it defines what you are looking for (shape, size, contrast polarity, orientation).
 - **Images 1–{len(proc_zones)}**: Process step crops of the same spatial zone, ordered from latest to earliest:
 {filenames_str}
-- Process filenames follow the pattern `<ID>_<step_number>_In.jpg` (before step) and `<ID>_<step_number>_Out.jpg` (after step). Higher step numbers are earlier in the process, higher ID numbers are later in the steps sequence.
+- Filenames follow `<ID>_<step_number>_In.jpg` (before step) / `<ID>_<step_number>_Out.jpg` (after step). Higher step numbers = earlier in process; higher IDs = later in sequence.
+- **Defect type**: {defect_info}
 
-## What to do
-- Given these images, help me find which picture is the origin of the defect going from the OG reference.
-- Take into consideration that the defect shape, size might change compare to the OG reference but it should still be in the box and be similar enough. 
-- ALWAYS try to traceback at far as possible in the process line. Take extra in determining if there're any defects visible.
-- Defects can be numorous things: stains, dent, scratches, etc.
-Give me the name of that picture (filename) where the defect first appears, include all `<ID>_<step_number>_In|Out.jpg` in the name.
+## How to analyze each process image
+1. **Anchor on the OG defect first**: Note its shape, size, contrast (bright or dark vs. background), and orientation from the red box in Image 0.
+2. **Match against the OG**: Look for an anomaly at the center that matches the OG defect in shape, orientation, and contrast polarity. The defect may be slightly fainter, smaller, or less defined in earlier steps. It may also be shifted, rotated, or otherwise shifted from the reference. 
+3. **Look for other anomalies**: There might be other anomalies present in later steps due to process variations. If seen, make remarks in the report.
+3. **Do NOT confuse normal features with defects**: Process images are darker and have different contrast than the OG. Circuit patterns, surface texture, imaging noise, and alignment artifacts are NOT defects. A true match must stand out from its local surroundings in a way consistent with the OG defect.
+4. **Assess each image independently first**, then check whether the timeline is consistent.
+
+## Decision criteria
+- **PRESENT**: You can clearly identify the same defect (matching shape, position, contrast polarity). Confidence ≥ 0.7.
+- **ABSENT**: The center zone is clean with no anomaly matching the OG defect. Confidence ≥ 0.7.
+- **INCONCLUSIVE**: There may be something at the expected location but you cannot confidently confirm it matches the OG defect, OR image quality/contrast prevents reliable assessment. Confidence < 0.7.
+- **When in doubt between PRESENT and INCONCLUSIVE, prefer INCONCLUSIVE.** Precision matters — a false PRESENT is worse than a missed detection.
+
+## Consistency checks
+- If a defect is ABSENT at step N_Out but PRESENT at N_In (i.e., defect before a step but not after), flag this as anomalous.
+- If the defect appears and disappears inconsistently across the timeline, note this explicitly.
+
+## Origin determination
+- The **origin** is the EARLIEST image where the defect is confidently PRESENT (not INCONCLUSIVE).
+- If all process images are ABSENT or INCONCLUSIVE, set origin to "DVI".
 
 ## Response format — respond with ONLY this JSON, no other text:
 {{
@@ -508,7 +536,7 @@ Give me the name of that picture (filename) where the defect first appears, incl
         ...
     ],
     "origin": "<filename where defect first appears, or 'DVI' if absent in all>",
-    "reasoning": "Brief explanation of how you traced the defect origin, make remarks if there're any changes in the defects over time."
+    "reasoning": "Brief explanation: what visual evidence you saw (or didn't) in key images, any changes in defect appearance over time, and any timeline inconsistencies."
 }}"""
 
         log.info(f"  VLM batch analyzing {len(proc_zones)} process crops for defect {defect_id}...")
@@ -693,8 +721,8 @@ def proc_sort_key(fname):
 # Main
 # ============================================================
 def main():
-    uploads = './U6P22X1603318'
-    outdir  = './U6P22X1603318/output'
+    uploads = './U65E35A201073'
+    outdir  = './U65E35A201073/output'
     os.makedirs(outdir, exist_ok=True)
 
     # ---------- 0. Initialize VLM ----------
@@ -769,7 +797,7 @@ def main():
     print("STEP 3: Aligning process images")
     print("=" * 60)
 
-    aligner = AxisAligner()
+    aligner = AxisAligner() # ALIGN MODULE
     alignments: Dict[str, AxisAffine] = {}
 
     for fname in proc_sorted:
@@ -1092,6 +1120,15 @@ def main():
                             f.write(f"{'':26s}  {line}\n")
             f.write("\n")
 
+        total_defect = sum(1 for _, _, _, _ in all_results)
+        f.write("=" * 70 + "\n")
+        f.write("SUMARY:\n")
+        f.write(f"TOTAL IMAGE: {len(proc_sorted)} \n")
+        f.write(f"TOTAL DEFECT IMAGE: {total_defect} \n")
+        f.write(f"TOTAL CLEAN IMAGE: {len(proc_sorted) - total_defect} \n")
+        f.write(f"TOTAL INCONCLUDED IMAGE: {sum(1 for _, verdicts, _, _ in all_results for v in verdicts if v.status == 'INCONCLUSIVE')} \n")
+        f.write("=" * 70 + "\n")
+        
         f.write("=" * 70 + "\n")
         f.write("LEGEND:\n")
         f.write("  PRESENT      - VLM detected defect pattern in process image\n")

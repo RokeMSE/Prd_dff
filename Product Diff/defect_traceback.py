@@ -62,21 +62,29 @@ class DefectBox:
     m_pos_x: float
     m_pos_y: float
     og_frame: str = ""
+    coord_space: str = "DVI"  # "DVI" = 3000x5500 normalized, "PIXEL" = raw image pixels
 
     def __post_init__(self):
         self.og_frame = os.path.basename(self.image_path)
 
     def to_pixel_rect(self, img_w: int, img_h: int) -> Tuple[int, int, int, int]:
         """(x1, y1, x2, y2) in uploaded-image pixel coords."""
-        sx = img_w / ORIG_WIDTH
-        sy = img_h / ORIG_HEIGHT
-        cx = self.box_ctr_x * sx
-        cy = self.box_ctr_y * sy
-        hw = max(self.box_side_x * sx / 2, 1)
-        hh = max(self.box_side_y * sy / 2, 1)
+        if self.coord_space == "PIXEL":
+            cx, cy = self.box_ctr_x, self.box_ctr_y
+            hw = max(self.box_side_x / 2, 1)
+            hh = max(self.box_side_y / 2, 1)
+        else:
+            sx = img_w / ORIG_WIDTH
+            sy = img_h / ORIG_HEIGHT
+            cx = self.box_ctr_x * sx
+            cy = self.box_ctr_y * sy
+            hw = max(self.box_side_x * sx / 2, 1)
+            hh = max(self.box_side_y * sy / 2, 1)
         return (int(cx - hw), int(cy - hh), int(cx + hw), int(cy + hh))
 
     def center_pixel(self, img_w: int, img_h: int) -> Tuple[int, int]:
+        if self.coord_space == "PIXEL":
+            return (int(self.box_ctr_x), int(self.box_ctr_y))
         sx = img_w / ORIG_WIDTH
         sy = img_h / ORIG_HEIGHT
         return (int(self.box_ctr_x * sx), int(self.box_ctr_y * sy))
@@ -98,8 +106,10 @@ class OriginVerdict:
 def parse_csv(path: str) -> List[DefectBox]:
     df = pd.read_csv(path)
     df.columns = df.columns.str.strip()
+    has_coord_space = 'COORD_SPACE' in df.columns
     boxes = []
     for _, r in df.iterrows():
+        coord_space = str(r.get('COORD_SPACE', 'DVI')).strip().upper() if has_coord_space else 'DVI'
         boxes.append(DefectBox(
             lot=str(r['LOT']).strip(),
             visual_id=str(r['VISUAL_ID']).strip(),
@@ -110,8 +120,9 @@ def parse_csv(path: str) -> List[DefectBox]:
             box_side_x=float(r['BOX_SIDE_X']),
             box_side_y=float(r['BOX_SIDE_Y']),
             image_path=str(r['IMAGE_FULL_PATH']).strip(),
-            m_pos_x=float(r['M_POSITION_X']),
-            m_pos_y=float(r['M_POSITION_Y']),
+            m_pos_x=float(r.get('M_POSITION_X', 0)),
+            m_pos_y=float(r.get('M_POSITION_Y', 0)),
+            coord_space=coord_space,
         ))
     return boxes
 
