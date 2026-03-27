@@ -508,7 +508,7 @@ Determine in which process step a defect first appeared by examining cropped ima
 1. **Anchor on the OG defect first**: Note its shape, size, contrast (bright or dark vs. background), and orientation from the red box in Image 0.
 2. **Match against the OG**: Look for an anomaly at the center that matches the OG defect in shape, orientation, and contrast polarity. The defect may be slightly fainter, smaller, or less defined in earlier steps. It may also be shifted, rotated, or otherwise shifted from the reference. 
 3. **Look for other anomalies**: There might be other anomalies present in later steps due to process variations. If seen, make remarks in the report.
-3. **Do NOT confuse normal features with defects**: Process images are darker and have different contrast than the OG. Circuit patterns, surface texture, imaging noise, and alignment artifacts are NOT defects. A true match must stand out from its local surroundings in a way consistent with the OG defect.
+3. **Do NOT confuse normal features with defects**: Circuit patterns, surface texture, imaging noise, and alignment artifacts are NOT defects. A true match must stand out from its local surroundings in a way consistent with the OG defect.
 4. **Assess each image independently first**, then check whether the timeline is consistent.
 
 ## Decision criteria
@@ -596,7 +596,7 @@ Determine in which process step a defect first appeared by examining cropped ima
 # Drawing Helpers
 # ============================================================
 def draw_box(img, rect, label, color=C_RED, pad=0, thickness=2):
-    out = img.copy()
+    out = np.ascontiguousarray(img.copy())
     h, w = out.shape[:2]
     x1, y1, x2, y2 = rect
 
@@ -623,7 +623,7 @@ def draw_box(img, rect, label, color=C_RED, pad=0, thickness=2):
     return out
 
 def banner(img, text, color=C_CYAN, height=30):
-    out = img.copy()
+    out = np.ascontiguousarray(img.copy())
     h, w = out.shape[:2]
     cv2.rectangle(out, (0, 0), (w, height), C_BLACK, -1)
     cv2.putText(out, text, (5, height-8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
@@ -664,7 +664,7 @@ def normalize_contrast(img: np.ndarray, clip_limit=3.0, grid=(8, 8)) -> np.ndarr
     l, a, b = cv2.split(lab)
     clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=grid)
     l = clahe.apply(l)
-    return cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
+    return np.ascontiguousarray(cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR))
 
 
 def enhance_process_image(img: np.ndarray, clip_limit=4.0, gamma=0.6) -> np.ndarray:
@@ -680,7 +680,7 @@ def enhance_process_image(img: np.ndarray, clip_limit=4.0, gamma=0.6) -> np.ndar
     enhanced = cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
     blur = cv2.GaussianBlur(enhanced, (0, 0), sigmaX=2)
     enhanced = cv2.addWeighted(enhanced, 1.5, blur, -0.5, 0)
-    return enhanced
+    return np.ascontiguousarray(enhanced)
 
 
 def auto_match_og_to_process(og: np.ndarray, proc_sample: np.ndarray):
@@ -934,7 +934,7 @@ def run_traceback(uploads_dir: str, outdir: str,
             annotated_imgs.append((fname, ann))
 
             out_p = os.path.join(outdir, f"TB_{d.dr_sub_item}_{fname}")
-            # cv2.imwrite(out_p, ann)
+            cv2.imwrite(out_p, ann)
             output_images.append(out_p)
 
         # Origin validation / fallback
@@ -954,18 +954,33 @@ def run_traceback(uploads_dir: str, outdir: str,
 
         # Build traceback panel
         THUMB_H = 600
+        LABEL_H = 28
+
+        def _add_bottom_label(img, text):
+            """Append a black bar with white text at the bottom of an image."""
+            w = img.shape[1]
+            bar = np.zeros((LABEL_H, w, 3), dtype=np.uint8)
+            # Truncate text to fit width
+            max_chars = max(1, w // 8)
+            disp = text if len(text) <= max_chars else text[:max_chars-2] + ".."
+            cv2.putText(bar, disp, (4, LABEL_H - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.42, C_WHITE, 1, cv2.LINE_AA)
+            return np.vstack([img, bar])
+
         panel_imgs = []
         og_ann = draw_box(og_img.copy(), og_rect, d.dr_sub_item, pad=30)
         og_ann = banner(og_ann, f"OG: {ref_key}", C_RED)
+        og_ann = _add_bottom_label(og_ann, ref_key)
         panel_imgs.append(og_ann)
 
-        arrow = np.zeros((THUMB_H, 50, 3), dtype=np.uint8)
+        arrow = np.zeros((THUMB_H + LABEL_H, 50, 3), dtype=np.uint8)
         cv2.arrowedLine(arrow, (45, THUMB_H//2), (5, THUMB_H//2), C_WHITE, 2, tipLength=0.25)
         panel_imgs.append(arrow)
 
         for _fname, ann in annotated_imgs:
+            ann = _add_bottom_label(ann, _fname)
             panel_imgs.append(ann)
-            arr = np.zeros((THUMB_H, 50, 3), dtype=np.uint8)
+            arr = np.zeros((THUMB_H + LABEL_H, 50, 3), dtype=np.uint8)
             cv2.arrowedLine(arr, (45, THUMB_H//2), (5, THUMB_H//2), C_WHITE, 2, tipLength=0.25)
             panel_imgs.append(arr)
         if panel_imgs:
@@ -994,7 +1009,7 @@ def run_traceback(uploads_dir: str, outdir: str,
 
     for k in og_imgs:
         img = ref_img_mild if k == ref_key else og_imgs[k]
-        ann = img.copy()
+        ann = np.ascontiguousarray(img.copy())
         h, w = ann.shape[:2]
         for dd in defects_by_og.get(k, []):
             rect = dd.to_pixel_rect(w, h)
@@ -1011,11 +1026,18 @@ def run_traceback(uploads_dir: str, outdir: str,
         h, w = img.shape[:2]
         rect = d.to_pixel_rect(w, h)
         x1, y1, x2, y2 = rect
+        # Skip if defect box is entirely outside the reference image
+        if x2 <= 0 or y2 <= 0 or x1 >= w or y1 >= h:
+            continue
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(w, x2), min(h, y2)
         zp = 60
-        zx1, zy1 = max(0, x1-zp), max(0, y1-zp)
-        zx2, zy2 = min(w, x2+zp), min(h, y2+zp)
-        crop = img[zy1:zy2, zx1:zx2].copy()
-        cv2.rectangle(crop, (x1-zx1, y1-zy1), (x2-zx1, y2-zy1), C_RED, 2)
+        zx1, zy1 = max(0, x1 - zp), max(0, y1 - zp)
+        zx2, zy2 = min(w, x2 + zp), min(h, y2 + zp)
+        if zx2 <= zx1 or zy2 <= zy1:
+            continue
+        crop = np.ascontiguousarray(img[zy1:zy2, zx1:zx2].copy())
+        cv2.rectangle(crop, (x1 - zx1, y1 - zy1), (x2 - zx1, y2 - zy1), C_RED, 2)
         crop = cv2.resize(crop, None, fx=3, fy=3, interpolation=cv2.INTER_LANCZOS4)
         zpath = os.path.join(outdir,
             f"ZONE_{d.dr_sub_item}_ctr{int(d.box_ctr_x)}_{int(d.box_ctr_y)}.jpg")
@@ -1310,7 +1332,7 @@ def main():
         print(f"    >>> ORIGIN: {origin}")
 
         # --- Build traceback panel ---
-        THUMB_H = 600
+        THUMB_H = 500
         panel_imgs = []
 
         og_ann = draw_box(og_img.copy(), og_rect, d.dr_sub_item, pad=30)
