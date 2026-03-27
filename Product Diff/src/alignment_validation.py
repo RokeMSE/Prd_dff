@@ -61,7 +61,7 @@ class AxisAffine:
         """Padding that accounts for alignment uncertainty (matches AlignResult API)."""
         return int(30 + 5.0 * self.reproj_p95)
 
-    # ---- point / rect mapping (OG → process) ----
+    # ---- point / rect mapping (OG -> process) ----
     def forward_pt(self, x: float, y: float) -> Tuple[float, float]:
         return (self.sx * x + self.tx, self.sy * y + self.ty)
 
@@ -83,7 +83,7 @@ class AxisAffine:
         )
 
     # ---- matrix forms ----
-    def to_2x3(self) -> np.ndarray:
+    def to_2x3(self) -> np.ndarray: 
         """For cv2.warpAffine."""
         return np.array([
             [self.sx, 0, self.tx],
@@ -110,7 +110,6 @@ class AxisAffine:
 
 
 # Preprocessing
-
 def detect_active_region(gray: np.ndarray, border_thresh: int = 15,
                          min_fraction: float = 0.4) -> Tuple[int, int, int, int]:
     """Bounding box of active content, ignoring black borders / corner dots.
@@ -443,7 +442,6 @@ class AxisAligner:
         return cv2.warpAffine(og, affine.to_2x3(), (w, h))
 
 
-
 # Visual Diagnostics
 def _checkerboard_blend(img1: np.ndarray, img2: np.ndarray,
                         block: int = 80) -> np.ndarray:
@@ -642,7 +640,6 @@ def validate_with_landmarks(og_gray: np.ndarray, proc_gray: np.ndarray,
     }
 
 
-
 # Top-level API
 def validate_alignment(og_path: str, proc_path: str,
                        outdir: Optional[str] = None,
@@ -758,7 +755,6 @@ def validate_all(og_path: str, proc_dir: str,
         print("=" * 80)
 
     return results
-
 
 # CLI (for when using separately just for aligning images)
 def main():

@@ -727,8 +727,8 @@ def proc_sort_key(fname):
 # Main 
 # ============================================================
 def main():
-    uploads = './U6P22X1603318'
-    outdir  = './U6P22X1603318/output'
+    uploads = './U65E35A201073'
+    outdir  = './U65E35A201073/output'
     os.makedirs(outdir, exist_ok=True)
 
     # ---------- 1. Parse CSV ----------

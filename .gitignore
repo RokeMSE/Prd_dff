@@ -7,3 +7,5 @@ Product Diff/pyvenv.cfg
 /Product Diff/img/output
 .claude/settings.local.json
 Product Diff/.env
+Product Diff/src/.env
+/Product Diff/src/output

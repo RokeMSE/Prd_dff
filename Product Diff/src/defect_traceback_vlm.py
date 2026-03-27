@@ -68,7 +68,7 @@ VLM_CONTEXT_PAD = 60
 VLM_BATCH_LIMIT = 50   # max images per VLM request (incl. OG reference)
 
 # ============================================================
-# VLM Service Layer (multi-provider)
+# VLM Service Layer
 # ============================================================
 class VLMService:
     """Abstract base for VLM providers."""
@@ -89,7 +89,7 @@ class GeminiVLM(VLMService):
     def analyze_images(self, images: list, prompt: str) -> str:
         contents = []
         for img in images:
-            contents.append(img)  # PIL Image — Gemini accepts natively
+            contents.append(img) 
         contents.append(prompt)
         try:
             response = self.client.models.generate_content(
@@ -146,6 +146,7 @@ class AzureOpenAIVLM(VLMService):
             api_key=api_key,
             azure_endpoint=azure_endpoint,
             api_version=api_version,
+            http_client=None,  # Use default HTTP client with retries (important for Azure's occasional timeouts)
         )
         self.model_name = model_name
 
@@ -201,7 +202,7 @@ class OllamaVLM(VLMService):
 
 
 def create_vlm_service() -> VLMService:
-    """Factory: reads .env / environment variables to create the right VLM."""
+    """reads .env / environment variables to create the right VLM."""
     try:
         from dotenv import load_dotenv
         env_path = os.path.join(os.path.dirname(__file__), ".env")
@@ -240,7 +241,7 @@ def create_vlm_service() -> VLMService:
 
 
 # ============================================================
-# Data Classes (shared with algorithmic version)
+# Data Classes
 # ============================================================
 @dataclass
 class DefectBox:
@@ -253,8 +254,6 @@ class DefectBox:
     box_side_x: float
     box_side_y: float
     image_path: str
-    m_pos_x: float
-    m_pos_y: float
     og_frame: str = ""
     coord_space: str = "DVI"  # "DVI" = 3000x5500 normalized, "PIXEL" = raw image pixels
 
@@ -312,8 +311,6 @@ def parse_csv(path: str) -> List[DefectBox]:
             box_side_x=float(r['BOX_SIDE_X']),
             box_side_y=float(r['BOX_SIDE_Y']),
             image_path=str(r['IMAGE_FULL_PATH']).strip(),
-            m_pos_x=float(r.get('M_POSITION_X', 0)),
-            m_pos_y=float(r.get('M_POSITION_Y', 0)),
             coord_space=coord_space,
         ))
     return boxes
@@ -333,7 +330,6 @@ class VLMOriginDetector:
         self.vlm = vlm
 
     # ---- image preparation helpers ----
-
     def _cv2_to_pil(self, img: np.ndarray) -> "Image.Image":
         """Convert OpenCV BGR image to PIL RGB."""
         if img.ndim == 2:
@@ -445,7 +441,7 @@ class VLMOriginDetector:
                                 proc_zones: List[Dict]) -> str:
         """Pick the true origin from multi-batch results.
 
-        proc_zones is ordered newest → oldest, so the last PRESENT image
+        proc_zones is ordered newest -> oldest, so the last PRESENT image
         in that order is the earliest process step where the defect exists.
         """
         proc_order = [pz['filename'] for pz in proc_zones]
@@ -492,7 +488,7 @@ class VLMOriginDetector:
             if outdir:
                 tag = f"_{defect_id}" if defect_id else ""
                 dbg_path = os.path.join(outdir, f"DBG_{fname.replace('.jpg', '')}{tag}_CROP.jpg")
-                cv2.imwrite(dbg_path, vis)
+                # cv2.imwrite(dbg_path, vis)
 
         filenames_str = "\n".join(image_listing)
 
@@ -597,7 +593,7 @@ Determine in which process step a defect first appeared by examining cropped ima
 
 
 # ============================================================
-# Drawing Helpers (same as algorithmic version)
+# Drawing Helpers
 # ============================================================
 def draw_box(img, rect, label, color=C_RED, pad=0, thickness=2):
     out = img.copy()
@@ -626,14 +622,12 @@ def draw_box(img, rect, label, color=C_RED, pad=0, thickness=2):
     cv2.putText(out, label, (lx+2, ly-2), font, fs, C_WHITE, 1, cv2.LINE_AA)
     return out
 
-
 def banner(img, text, color=C_CYAN, height=30):
     out = img.copy()
     h, w = out.shape[:2]
     cv2.rectangle(out, (0, 0), (w, height), C_BLACK, -1)
     cv2.putText(out, text, (5, height-8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
     return out
-
 
 def hstack_padded(imgs, target_h):
     resized = []
@@ -645,7 +639,6 @@ def hstack_padded(imgs, target_h):
     if not resized:
         return np.zeros((target_h, 200, 3), dtype=np.uint8)
     return np.hstack(resized)
-
 
 def vstack_padded(imgs, target_w):
     padded = []
@@ -664,7 +657,7 @@ def vstack_padded(imgs, target_w):
 
 
 # ============================================================
-# Image Preprocessing (same as algorithmic version)
+# Image Preprocessing
 # ============================================================
 def normalize_contrast(img: np.ndarray, clip_limit=3.0, grid=(8, 8)) -> np.ndarray:
     lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
@@ -718,7 +711,381 @@ def proc_sort_key(fname):
 
 
 # ============================================================
-# Main
+# Callable API for frontend integration
+# ============================================================
+def run_traceback(uploads_dir: str, outdir: str,
+                  defect_boxes: Optional[List[DefectBox]] = None,
+                  ref_image_key: Optional[str] = None,
+                  progress_callback=None) -> dict:
+    """Run VLM-assisted defect traceback pipeline.
+
+    Args:
+        uploads_dir:  Directory containing OG images, process images,
+                      and optionally DVI_box_data.csv.
+        outdir:       Output directory for results.
+        defect_boxes: Pre-built DefectBox list (manual mode).
+                      If None, parses DVI_box_data.csv from uploads_dir.
+        ref_image_key: Filename of the OG image to use as reference.
+                       If None, auto-selects FRAME2.
+        progress_callback: Optional callable(step, total, message).
+
+    Returns:
+        dict with keys:
+          report_path, report_text, output_images,
+          all_results (list of (DefectBox, verdicts, origin, panel)),
+          origin_summary, ref_key, proc_sorted, error (if any).
+    """
+    os.makedirs(outdir, exist_ok=True)
+    TOTAL_STEPS = 7
+
+    def _prog(step, msg):
+        log.info(msg)
+        if progress_callback:
+            progress_callback(step, TOTAL_STEPS, msg)
+
+    # ---------- 0. Initialize VLM ----------
+    _prog(0, "Initializing VLM service…")
+    vlm = create_vlm_service()
+
+    # ---------- 1. Defect boxes ----------
+    if defect_boxes is None:
+        _prog(1, "Parsing defect CSV…")
+        csv_path = os.path.join(uploads_dir, 'DVI_box_data.csv')
+        if not os.path.isfile(csv_path):
+            return {'error': f'DVI_box_data.csv not found in {uploads_dir}'}
+        defects = parse_csv(csv_path)
+    else:
+        defects = defect_boxes
+
+    if not defects:
+        return {'error': 'No defect boxes provided or found in CSV.'}
+
+    # ---------- 2. Load images ----------
+    _prog(2, "Loading images…")
+    og_imgs: Dict[str, np.ndarray] = {}
+    proc_imgs: Dict[str, np.ndarray] = {}
+    og_pat  = re.compile(r'X\w+_\d+_\d+_.*FRAME\d+.*\.(jpg|jpeg|png)', re.IGNORECASE)
+    proc_pat = re.compile(r'(?:\w+_)?\d+_(In|Out)\.(jpg|jpeg|png)', re.IGNORECASE)
+
+    for f in sorted(os.listdir(uploads_dir)):
+        path = os.path.join(uploads_dir, f)
+        if not os.path.isfile(path):
+            continue
+        if og_pat.match(f):
+            img = cv2.imread(path)
+            if img is not None:
+                og_imgs[f] = img
+        elif proc_pat.match(f):
+            img = cv2.imread(path)
+            if img is not None:
+                proc_imgs[f] = img
+
+    if not og_imgs:
+        # Manual mode fallback: use the reference image from defect boxes
+        if defect_boxes:
+            for db in defect_boxes:
+                ref_path = db.image_path
+                if os.path.isfile(ref_path):
+                    ref_name = os.path.basename(ref_path)
+                    img = cv2.imread(ref_path)
+                    if img is not None:
+                        og_imgs[ref_name] = img
+                        # Remove from proc_imgs to avoid self-comparison
+                        proc_imgs.pop(ref_name, None)
+                        log.info(f"No OG images found; using manual reference: {ref_name}")
+                        break
+        if not og_imgs:
+            return {'error': f'No OG (FRAME) images found in {uploads_dir}'}
+    if not proc_imgs:
+        return {'error': f'No process images found in {uploads_dir}'}
+
+    # Pick reference frame
+    if ref_image_key and ref_image_key in og_imgs:
+        ref_key = ref_image_key
+    else:
+        ref_key = None
+        for k in og_imgs:
+            if 'FRAME2' in k.upper():
+                ref_key = k
+                break
+        if ref_key is None:
+            ref_key = list(og_imgs.keys())[0]
+
+    ref_img_raw = og_imgs[ref_key]
+    proc_sorted = sorted(proc_imgs.keys(), key=proc_sort_key)
+
+    # ---------- 2b. Preprocess ----------
+    proc_sample = proc_imgs[proc_sorted[0]]
+    ref_img, og_was_inverted = auto_match_og_to_process(ref_img_raw, proc_sample)
+
+    proc_imgs_mild: Dict[str, np.ndarray] = {}
+    for fname in proc_sorted:
+        proc_imgs_mild[fname] = normalize_contrast(proc_imgs[fname], clip_limit=3.0)
+    ref_img_mild = cv2.bitwise_not(ref_img_raw) if og_was_inverted else ref_img_raw.copy()
+    ref_img_mild = normalize_contrast(ref_img_mild, clip_limit=3.0)
+
+    # ---------- 3. Align ----------
+    _prog(3, "Aligning process images…")
+    aligner = AxisAligner()
+    alignments: Dict[str, AxisAffine] = {}
+    for fname in proc_sorted:
+        ar = aligner.align(ref_img_raw, proc_imgs[fname])
+        alignments[fname] = ar
+
+    # ---------- 4. VLM traceback ----------
+    _prog(4, "Running VLM traceback…")
+    detector = VLMOriginDetector(vlm)
+    all_results = []
+    output_images = []
+
+    for d in defects:
+        og_img = ref_img_mild
+        h_og, w_og = og_img.shape[:2]
+        og_rect = d.to_pixel_rect(w_og, h_og)
+        ref_rect = og_rect
+        defect_id = f"{d.dr_sub_item}_ctr{int(d.box_ctr_x)}_{int(d.box_ctr_y)}"
+
+        proc_zones: List[Dict] = []
+        skip_verdicts: List[OriginVerdict] = []
+        annotated_imgs = []
+        proc_rects: Dict[str, tuple] = {}
+
+        for fname in proc_sorted:
+            ar = alignments[fname]
+            proc = proc_imgs[fname]
+            proc_n = proc_imgs_mild[fname]
+            ph, pw = proc.shape[:2]
+
+            if not ar.ok or ar.inliers < 15:
+                skip_verdicts.append(OriginVerdict(
+                    fname, "ALIGN_FAIL", 0,
+                    f"Alignment failed ({ar.inliers} inliers)", {}))
+                annotated_imgs.append((fname,
+                    banner(proc, f"{fname} | ALIGN FAIL | INCONCLUSIVE", C_ORANGE)))
+                continue
+
+            pad = ar.adaptive_pad
+            proc_rect = aligner.map_rect(ref_rect, ar, pad=pad)
+            if proc_rect is None:
+                skip_verdicts.append(OriginVerdict(
+                    fname, "INCONCLUSIVE", 0, "Box mapping failed", {}))
+                continue
+
+            px1, py1, px2, py2 = proc_rect
+            if not (px1 >= -pad and py1 >= -pad and px2 < pw + pad and py2 < ph + pad):
+                skip_verdicts.append(OriginVerdict(
+                    fname, "OUT_OF_VIEW", 0,
+                    f"Mapped box outside image ({pw}x{ph})", {}))
+                annotated_imgs.append((fname,
+                    banner(proc, f"{fname} | OUT OF VIEW | N/A", C_ORANGE)))
+                continue
+
+            zone = detector._extract_zone(proc_n, proc_rect, context_pad=VLM_CONTEXT_PAD)
+            if zone.size < 100:
+                skip_verdicts.append(OriginVerdict(
+                    fname, "OUT_OF_VIEW", 0, "Cropped zone too small", {}))
+                continue
+
+            proc_zones.append({'filename': fname, 'image': zone, 'rect': proc_rect})
+            proc_rects[fname] = (proc_rect, pad)
+
+        # Single VLM call for all zones
+        if proc_zones:
+            vlm_verdicts, origin = detector.analyze_all_zones(
+                og_img, og_rect, proc_zones,
+                defect_info=d.dr_sub_item,
+                outdir=outdir, defect_id=defect_id)
+        else:
+            vlm_verdicts, origin = [], "UNKNOWN"
+
+        vlm_map = {v.filename: v for v in vlm_verdicts}
+        verdicts: List[OriginVerdict] = []
+        for fname in proc_sorted:
+            sv = next((v for v in skip_verdicts if v.filename == fname), None)
+            if sv:
+                verdicts.append(sv)
+            elif fname in vlm_map:
+                verdicts.append(vlm_map[fname])
+
+        # Annotate process images
+        for v in verdicts:
+            fname = v.filename
+            if v.status in ("ALIGN_FAIL", "OUT_OF_VIEW") or fname not in proc_rects:
+                continue
+            proc_rect, pad = proc_rects[fname]
+            ar = alignments[fname]
+            proc = proc_imgs[fname]
+            ph, pw = proc.shape[:2]
+
+            tight_rect = aligner.map_rect(ref_rect, ar, pad=0)
+            ann = draw_box(proc, proc_rect, d.dr_sub_item, color=C_RED, pad=0, thickness=2)
+            if tight_rect is not None:
+                tx1, ty1, tx2, ty2 = tight_rect
+                cv2.rectangle(ann,
+                    (max(0, tx1), max(0, ty1)),
+                    (min(pw-1, tx2), min(ph-1, ty2)), C_YELLOW, 1)
+
+            scol = {"PRESENT": C_RED, "ABSENT": C_GREEN,
+                    "INCONCLUSIVE": C_ORANGE, "VLM_ERROR": C_ORANGE,
+                    }.get(v.status, C_CYAN)
+            ann = banner(ann,
+                f"{fname} | {ar.method} {ar.inliers}inl pad={pad}px | "
+                f"VLM: {v.status} ({v.confidence:.0%})", scol)
+            annotated_imgs.append((fname, ann))
+
+            out_p = os.path.join(outdir, f"TB_{d.dr_sub_item}_{fname}")
+            # cv2.imwrite(out_p, ann)
+            output_images.append(out_p)
+
+        # Origin validation / fallback
+        if origin == "DVI":
+            origin = "DVI (defect first appears at final inspection)"
+        elif origin == "UNKNOWN" or origin not in [pz['filename'] for pz in proc_zones]:
+            present = [v for v in verdicts if v.status == "PRESENT"]
+            if present:
+                origin = max(present, key=lambda v: v.confidence).filename
+            elif all(v.status == "ABSENT" for v in verdicts
+                     if v.status not in ("ALIGN_FAIL", "OUT_OF_VIEW", "VLM_ERROR")):
+                origin = "DVI (defect first appears at final inspection)"
+            else:
+                inc = [v for v in verdicts if v.status == "INCONCLUSIVE"]
+                if inc:
+                    origin = f"INCONCLUSIVE (possibly {inc[0].filename})"
+
+        # Build traceback panel
+        THUMB_H = 600
+        panel_imgs = []
+        og_ann = draw_box(og_img.copy(), og_rect, d.dr_sub_item, pad=30)
+        og_ann = banner(og_ann, f"OG: {ref_key}", C_RED)
+        panel_imgs.append(og_ann)
+
+        arrow = np.zeros((THUMB_H, 50, 3), dtype=np.uint8)
+        cv2.arrowedLine(arrow, (45, THUMB_H//2), (5, THUMB_H//2), C_WHITE, 2, tipLength=0.25)
+        panel_imgs.append(arrow)
+
+        for _fname, ann in annotated_imgs:
+            panel_imgs.append(ann)
+            arr = np.zeros((THUMB_H, 50, 3), dtype=np.uint8)
+            cv2.arrowedLine(arr, (45, THUMB_H//2), (5, THUMB_H//2), C_WHITE, 2, tipLength=0.25)
+            panel_imgs.append(arr)
+        if panel_imgs:
+            panel_imgs = panel_imgs[:-1]  # drop trailing arrow
+
+        panel = hstack_padded(panel_imgs, THUMB_H)
+        title_bar = np.zeros((40, panel.shape[1], 3), dtype=np.uint8)
+        cv2.putText(title_bar,
+            f"VLM Traceback: {d.dr_sub_item} | "
+            f"ctr=({d.box_ctr_x:.0f},{d.box_ctr_y:.0f}) | ORIGIN: {origin}",
+            (5, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.55, C_WHITE, 1, cv2.LINE_AA)
+        panel = np.vstack([title_bar, panel])
+
+        panel_path = os.path.join(outdir,
+            f"PANEL_{d.dr_sub_item}_ctr{int(d.box_ctr_x)}_{int(d.box_ctr_y)}.jpg")
+        cv2.imwrite(panel_path, panel, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        output_images.append(panel_path)
+
+        all_results.append((d, verdicts, origin, panel))
+
+    # ---------- 5. Annotated OG images ----------
+    _prog(5, "Generating annotated OG images…")
+    defects_by_og = defaultdict(list)
+    for d in defects:
+        defects_by_og[ref_key].append(d)
+
+    for k in og_imgs:
+        img = ref_img_mild if k == ref_key else og_imgs[k]
+        ann = img.copy()
+        h, w = ann.shape[:2]
+        for dd in defects_by_og.get(k, []):
+            rect = dd.to_pixel_rect(w, h)
+            ann = draw_box(ann, rect, dd.dr_sub_item, pad=30)
+        n = len(defects_by_og.get(k, []))
+        ann = banner(ann, f"OG: {k} | {n} defect(s)", C_RED if n else C_GREEN)
+        out_p = os.path.join(outdir, f"OG_{k}")
+        cv2.imwrite(out_p, ann)
+        output_images.append(out_p)
+
+    # ---------- 6. Zone close-ups ----------
+    for d in defects:
+        img = ref_img_mild
+        h, w = img.shape[:2]
+        rect = d.to_pixel_rect(w, h)
+        x1, y1, x2, y2 = rect
+        zp = 60
+        zx1, zy1 = max(0, x1-zp), max(0, y1-zp)
+        zx2, zy2 = min(w, x2+zp), min(h, y2+zp)
+        crop = img[zy1:zy2, zx1:zx2].copy()
+        cv2.rectangle(crop, (x1-zx1, y1-zy1), (x2-zx1, y2-zy1), C_RED, 2)
+        crop = cv2.resize(crop, None, fx=3, fy=3, interpolation=cv2.INTER_LANCZOS4)
+        zpath = os.path.join(outdir,
+            f"ZONE_{d.dr_sub_item}_ctr{int(d.box_ctr_x)}_{int(d.box_ctr_y)}.jpg")
+        cv2.imwrite(zpath, crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        output_images.append(zpath)
+
+    # ---------- 7. Text report ----------
+    _prog(6, "Writing report…")
+    lot = defects[0].lot if defects else "N/A"
+    vid = defects[0].visual_id if defects else "N/A"
+
+    lines = []
+    lines.append("=" * 70)
+    lines.append("DEFECT ORIGIN TRACEBACK REPORT (VLM-Assisted)")
+    lines.append("=" * 70)
+    lines.append(f"LOT:       {lot}")
+    lines.append(f"VISUAL_ID: {vid}")
+    lines.append(f"Date:      {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(f"Reference: {ref_key}")
+    lines.append(f"Process images ({len(proc_sorted)}): {', '.join(proc_sorted)}")
+    lines.append("")
+
+    for d, verdicts, origin, _ in all_results:
+        lines.append("-" * 70)
+        lines.append(f"DEFECT: {d.dr_sub_item}")
+        lines.append(f"  Location:  ctr=({d.box_ctr_x:.0f}, {d.box_ctr_y:.0f})  "
+                     f"size=({d.box_side_x:.0f} x {d.box_side_y:.0f})")
+        lines.append(f"  OG Image:  {d.og_frame}")
+        lines.append(f"  ORIGIN:    {origin}")
+        lines.append("  Process-by-process VLM verdicts (newest -> oldest):")
+        for v in verdicts:
+            lines.append(f"    {v.filename:20s}  {v.status:15s}  "
+                         f"conf={v.confidence:.0%}  {v.detail[:100]}")
+            reasoning = v.metrics.get("vlm_reasoning", "") if v.metrics else ""
+            if reasoning:
+                for i in range(0, len(reasoning), 80):
+                    lines.append(f"{'':26s}  {reasoning[i:i+80]}")
+        lines.append("")
+
+    lines.append("=" * 70)
+    lines.append("LEGEND:")
+    lines.append("  PRESENT      - VLM detected defect pattern")
+    lines.append("  ABSENT       - Zone is clean / no defect")
+    lines.append("  INCONCLUSIVE - Cannot determine with confidence")
+    lines.append("  OUT_OF_VIEW  - Defect zone outside process image FOV")
+    lines.append("  ALIGN_FAIL   - Could not align process image")
+    lines.append("  VLM_ERROR    - VLM service returned an error")
+    lines.append("=" * 70)
+
+    report_text = "\n".join(lines)
+    rpath = os.path.join(outdir, "TRACEBACK_REPORT_VLM.txt")
+    with open(rpath, 'w', encoding='utf-8') as f:
+        f.write(report_text)
+
+    origin_summary = [(d.dr_sub_item, origin) for d, _, origin, _ in all_results]
+    _prog(7, "Done.")
+
+    return {
+        'report_path': rpath,
+        'report_text': report_text,
+        'output_images': output_images,
+        'all_results': all_results,
+        'origin_summary': origin_summary,
+        'ref_key': ref_key,
+        'proc_sorted': proc_sorted,
+    }
+
+
+# ============================================================
+# Main (standalone CLI)
 # ============================================================
 def main():
     uploads = './U65E35A201073'
@@ -749,7 +1116,7 @@ def main():
 
     og_imgs = {}
     proc_imgs = {}
-    og_pat  = re.compile(r'X\w+_\d+_\d+_.*FRAME\d+.*\.(jpg|jpeg|png)', re.IGNORECASE)
+    og_pat  = re.compile(r'X\w+_\d+_\d+_.*FRAME\d+.*\.(jpg|jpeg|png)', re.IGNORECASE) # This will change depending on the Manual | DIV mode
     proc_pat = re.compile(r'(?:\w+_)?\d+_(In|Out)\.(jpg|jpeg|png)', re.IGNORECASE)
 
     for f in sorted(os.listdir(uploads)):
@@ -921,7 +1288,7 @@ def main():
                 scol)
             annotated_imgs.append((fname, ann))
 
-            cv2.imwrite(os.path.join(outdir, f"TB_{d.dr_sub_item}_{fname}"), ann)
+            # cv2.imwrite(os.path.join(outdir, f"TB_{d.dr_sub_item}_{fname}"), ann)
             print(f"    {fname}: {v.status} ({v.confidence:.0%}) — {v.detail[:120]}")
 
         # --- Validate/fallback origin ---
@@ -969,10 +1336,7 @@ def main():
             (5, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.55, C_WHITE, 1, cv2.LINE_AA)
         panel = np.vstack([title, panel])
 
-        ppath = os.path.join(outdir, f"PANEL_{d.dr_sub_item}_ctr{int(d.box_ctr_x)}_{int(d.box_ctr_y)}.jpg")
-        cv2.imwrite(ppath, panel, [cv2.IMWRITE_JPEG_QUALITY, 95])
-
-        all_results.append((d, verdicts, origin, panel))
+        all_results.append((d, verdicts, origin, panel)) 
 
     # ---------- 5. Annotated OG images ----------
     print("\n" + "=" * 60)
@@ -993,7 +1357,7 @@ def main():
         n = len(defects_by_og.get(k, []))
         ann = banner(ann, f"OG: {k} | {n} defect(s){' [contrast-matched]' if k == ref_key else ''}", C_RED if n else C_GREEN)
         og_annotated[k] = ann
-        cv2.imwrite(os.path.join(outdir, f"OG_{k}"), ann)
+        # cv2.imwrite(os.path.join(outdir, f"OG_{k}"), ann)
         print(f"  {k}: {n} defects")
 
     # ---------- 6. Quarantine zone close-ups ----------
@@ -1012,77 +1376,14 @@ def main():
         cv2.rectangle(crop, (x1-zx1, y1-zy1), (x2-zx1, y2-zy1), C_RED, 2)
         crop = cv2.resize(crop, None, fx=3, fy=3, interpolation=cv2.INTER_LANCZOS4)
         zpath = os.path.join(outdir, f"ZONE_{d.dr_sub_item}_ctr{d.box_ctr_x:.0f}_{d.box_ctr_y:.0f}.jpg")
-        cv2.imwrite(zpath, crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        # cv2.imwrite(zpath, crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
         print(f"  {zpath}")
 
-    # ---------- 7. Summary Report ----------
-    print("\n" + "=" * 60)
-    print("STEP 7: Building summary report")
-    print("=" * 60)
-
-    W = 2800
-    sections = []
-
-    title = np.zeros((55, W, 3), dtype=np.uint8)
-    cv2.putText(title, "DEFECT TRACEBACK REPORT (VLM)", (10, 38),
-                cv2.FONT_HERSHEY_SIMPLEX, 1.1, C_WHITE, 2, cv2.LINE_AA)
-    sections.append(title)
-
-    info = np.zeros((35, W, 3), dtype=np.uint8)
+    # ---------- 7. Report ----------
     lot = defects[0].lot if defects else "N/A"
     vid = defects[0].visual_id if defects else "N/A"
-    cv2.putText(info, f"LOT: {lot}  |  VID: {vid}  |  Defects: {len(defects)}  |  Process: {len(proc_imgs)}  |  Method: VLM ({provider})",
-                (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.55, C_CYAN, 1, cv2.LINE_AA)
-    sections.append(info)
 
-    sep = np.full((3, W, 3), 80, dtype=np.uint8)
-    sections.append(sep)
-
-    og_row = hstack_padded(list(og_annotated.values()), 500)
-    if og_row.shape[1] < W:
-        og_row = np.hstack([og_row, np.zeros((og_row.shape[0], W-og_row.shape[1], 3), dtype=np.uint8)])
-    elif og_row.shape[1] > W:
-        og_row = og_row[:, :W]
-    sections.append(og_row)
-    sections.append(sep.copy())
-
-    # Origin summary table
-    tbl_h = 35 + 45 * len(all_results)
-    tbl = np.zeros((tbl_h, W, 3), dtype=np.uint8)
-    cv2.putText(tbl, "ORIGIN SUMMARY (VLM)", (10, 25),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, C_WHITE, 2, cv2.LINE_AA)
-    for i, (d, verdicts, origin, _) in enumerate(all_results):
-        y = 55 + i * 45
-        ocol = C_RED if "UNKNOWN" not in origin and "DVI" not in origin else (C_GREEN if "DVI" in origin else C_ORANGE)
-        text = f"{d.dr_sub_item}  ctr=({d.box_ctr_x:.0f},{d.box_ctr_y:.0f})  -->  ORIGIN: {origin}"
-        cv2.putText(tbl, text, (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, ocol, 1, cv2.LINE_AA)
-        chain = "  |  ".join(f"{v.filename}:{v.status}({v.confidence:.0%})" for v in verdicts)
-        cv2.putText(tbl, chain, (20, y + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (150, 150, 150), 1, cv2.LINE_AA)
-        # VLM reasoning snippet for the origin image
-        origin_v = next((v for v in verdicts if v.filename == origin), None)
-        if origin_v and origin_v.metrics.get("vlm_reasoning"):
-            reason_text = f"VLM: {origin_v.metrics['vlm_reasoning'][:120]}"
-            cv2.putText(tbl, reason_text, (20, y + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (120, 180, 120), 1, cv2.LINE_AA)
-    sections.append(tbl)
-    sections.append(sep.copy())
-
-    for d, verdicts, origin, panel in all_results:
-        if panel is not None:
-            if panel.shape[1] > W:
-                s = W / panel.shape[1]
-                panel = cv2.resize(panel, None, fx=s, fy=s)
-            if panel.shape[1] < W:
-                panel = np.hstack([panel, np.zeros((panel.shape[0], W-panel.shape[1], 3), dtype=np.uint8)])
-            sections.append(panel)
-            sections.append(sep.copy())
-
-    summary = np.vstack(sections)
-    spath = os.path.join(outdir, "SUMMARY_REPORT_VLM.jpg")
-    cv2.imwrite(spath, summary, [cv2.IMWRITE_JPEG_QUALITY, 95])
-    print(f"  Summary: {spath}")
-
-    # ---------- 8. Origin text report ----------
-    rpath = os.path.join(outdir, "ORIGIN_REPORT_VLM.txt")
+    rpath = os.path.join(outdir, "TRACEBACK_REPORT_VLM.txt")
     with open(rpath, 'w', encoding='utf-8') as f:
         f.write("=" * 70 + "\n")
         f.write("DEFECT ORIGIN TRACEBACK REPORT (VLM-Assisted)\n")
@@ -1091,7 +1392,7 @@ def main():
         f.write(f"VISUAL_ID: {vid}\n")
         f.write(f"Date:      {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"Reference: {ref_key}\n")
-        f.write(f"VLM:       {provider} ({vlm.__class__.__name__})\n")
+        # f.write(f"VLM:       {provider} ({vlm.__class__.__name__})\n")
         f.write(f"Process images ({len(proc_sorted)}): {', '.join(proc_sorted)}\n")
         f.write("\n")
 
@@ -1126,11 +1427,10 @@ def main():
         f.write(f"TOTAL IMAGE: {len(proc_sorted)} \n")
         f.write(f"TOTAL DEFECT IMAGE: {total_defect} \n")
         f.write(f"TOTAL CLEAN IMAGE: {len(proc_sorted) - total_defect} \n")
-        f.write(f"TOTAL INCONCLUDED IMAGE: {sum(1 for _, verdicts, _, _ in all_results for v in verdicts if v.status == 'INCONCLUSIVE')} \n")
+        f.write(f"TOTAL INCONCLUSIVE IMAGE: {sum(1 for _, verdicts, _, _ in all_results for v in verdicts if v.status == 'INCONCLUSIVE')} \n")
         f.write("=" * 70 + "\n")
         
         f.write("=" * 70 + "\n")
-        f.write("LEGEND:\n")
         f.write("  PRESENT      - VLM detected defect pattern in process image\n")
         f.write("  ABSENT       - VLM determined zone is clean / no defect\n")
         f.write("  INCONCLUSIVE - VLM could not determine with confidence\n")
