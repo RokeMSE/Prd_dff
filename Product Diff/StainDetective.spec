@@ -6,7 +6,7 @@ Build:
     cd "Product Diff"
     pyinstaller StainDetective.spec
 
-Output:  dist/StainDetective/StainDetective.exe  (--one)
+Output:  dist/StainDetective.exe  (--onefile)
 """
 
 import os
@@ -58,6 +58,21 @@ a = Analysis(
         "tornado",
         "matplotlib",
         "tkinter",
+        # Heavy packages not imported by any source file
+        "torch",
+        "torchvision",
+        "torchaudio",
+        "scipy",
+        "sklearn",
+        "scikit-learn",
+        "pyarrow",
+        "av",
+        "transformers",
+        "botocore",
+        "boto3",
+        "pyarrow",
+        "jedi",
+        "onnx",
     ],
     noarchive=False,
     cipher=block_cipher,
@@ -68,23 +83,13 @@ pyz = PYZ(a.pure, cipher=block_cipher)
 exe = EXE(
     pyz,
     a.scripts,
-    [],
-    exclude_binaries=True,
+    a.binaries,
+    a.datas,
     name="StainDetective",
     debug=False,
     bootloader_ignore_signals=False,
-    strip=False,
+    strip=True,
     upx=True,
     console=False,       # No console window (GUI app)
     icon=os.path.join(FRONTEND_DIR, "assets", "logo.png"),
-)
-
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    name="StainDetective",
 )

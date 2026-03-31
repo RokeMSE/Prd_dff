@@ -36,7 +36,7 @@ else:
 if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
-from defect_traceback_vlm import run_traceback, DefectBox  # noqa: E402
+from defect_traceback_vlm import run_traceback, DefectBox  
 
 
 # ============================================================
@@ -396,7 +396,7 @@ class DrawableImageWidget(QWidget):
             pen_lime = QPen(QColor(0, 255, 120), 2, Qt.DashLine)
             p.setPen(pen_lime)
             p.setBrush(QBrush(QColor(0, 255, 120, 25)))
-            r = QRect(self._start_pt, self._current_pt).normalized()
+            r = QRect(self._start_pt.toPoint(), self._current_pt.toPoint()).normalized()
             p.drawRect(r)
 
         # zoom indicator
@@ -770,11 +770,7 @@ class PanelViewDialog(QDialog):
         scroll.setWidget(img_label)
         lay.addWidget(scroll)
 
-        # Size dialog to fit image, capped at 90% of screen
-        screen = QApplication.primaryScreen().availableGeometry()
-        w = min(px.width() + 40, int(screen.width() * 0.9))
-        h = min(px.height() + 40, int(screen.height() * 0.85))
-        self.resize(w, h)
+        self.setWindowState(Qt.WindowMaximized)
 
 
 # ============================================================
@@ -885,6 +881,14 @@ class VisionApp(QWidget):
         self.loading_label.hide()
         top.addWidget(self.loading_label)
 
+# --- SEARCH BUTTON ---
+        btn_search = QPushButton("Search")
+        btn_search.setFixedHeight(36)
+        btn_search.setStyleSheet(BTN_SS.format(
+            bg=CLR_PRIMARY, hover=CLR_PRIMARY_DARK, pressed="#004080", pad="22px"))
+        btn_search.clicked.connect(self.perform_search)
+        top.addWidget(btn_search)
+
         # --- MANUAL BUTTON ---
         self.btn_manual = QPushButton("Manual")
         self.btn_manual.setFixedHeight(36)
@@ -905,14 +909,7 @@ class VisionApp(QWidget):
         self.btn_auto.clicked.connect(self.on_auto)
         top.addWidget(self.btn_auto)
 
-        # --- SEARCH BUTTON ---
-        btn_search = QPushButton("Search")
-        btn_search.setFixedHeight(36)
-        btn_search.setStyleSheet(BTN_SS.format(
-            bg=CLR_PRIMARY, hover=CLR_PRIMARY_DARK, pressed="#004080", pad="22px"))
-        btn_search.clicked.connect(self.perform_search)
-        top.addWidget(btn_search)
-
+        
         main.addLayout(top)
 
         # ==================================================
@@ -1060,22 +1057,6 @@ class VisionApp(QWidget):
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         ll.addWidget(self.table)
 
-        self.dvi_title = QLabel("DVI Record")
-        self.dvi_title.setStyleSheet(
-            f"font-size:14px;font-weight:700;color:{CLR_PRIMARY};"
-            f"margin-top:6px;border:none;")
-        self.dvi_title.hide()
-        ll.addWidget(self.dvi_title)
-
-        self.dvi_table = QTableWidget()
-        self.dvi_table.verticalHeader().setVisible(False)
-        self.dvi_table.setAlternatingRowColors(True)
-        self.dvi_table.setStyleSheet(TABLE_SS)
-        self.dvi_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.dvi_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
-        self.dvi_table.hide()
-        ll.addWidget(self.dvi_table)
-
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet(f"""
@@ -1104,6 +1085,23 @@ class VisionApp(QWidget):
         self.flow_layout = FlowLayout(self.flow_container)
         scroll.setWidget(self.flow_container)
         ll.addWidget(scroll)
+
+        self.dvi_title = QLabel("DVI Record")
+        self.dvi_title.setStyleSheet(
+            f"font-size:14px;font-weight:700;color:{CLR_PRIMARY};"
+            f"margin-top:6px;border:none;")
+        self.dvi_title.hide()
+        ll.addWidget(self.dvi_title)
+
+        self.dvi_table = QTableWidget()
+        self.dvi_table.verticalHeader().setVisible(False)
+        self.dvi_table.setAlternatingRowColors(True)
+        self.dvi_table.setStyleSheet(TABLE_SS)
+        self.dvi_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.dvi_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        self.dvi_table.hide()
+        ll.addWidget(self.dvi_table)
+
         splitter.addWidget(left)
 
         # RIGHT PREVIEW
@@ -1196,7 +1194,7 @@ class VisionApp(QWidget):
         thumb.setCursor(Qt.PointingHandCursor)
         thumb.mousePressEvent = lambda e, p=path: self.show_preview(p)
 
-        lbl = QLabel(caption)
+        lbl = QLabel(caption.replace("(", " - ").replace(")", ""))
         lbl.setFixedWidth(130)
         lbl.setAlignment(Qt.AlignCenter)
         lbl.setWordWrap(True)
@@ -1236,7 +1234,7 @@ class VisionApp(QWidget):
         if not vid:
             return
 
-        out_dir = os.path.join(OutputRoot, vid)
+        out_dir = os.path.join(OutputRoot, f"{vid}_output")
 
         self._start_searching()
         self._clear_results()
@@ -1395,9 +1393,9 @@ class VisionApp(QWidget):
     # --------------------------------------------------
     def _local_output_dir(self):
         """Always write traceback output locally, even if source is on cloud."""
-        local = os.path.join(OutputRoot, self._current_vid)
+        local = os.path.join(OutputRoot, f"{self._current_vid}_output")
         os.makedirs(local, exist_ok=True)
-        return os.path.join(local, "output")
+        return local
 
     def on_auto(self):
         if not self._traceback_dir:
@@ -1636,23 +1634,17 @@ class VisionApp(QWidget):
             return
 
         with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
-            # 1. Result images + report
+            # Result images + report
             if self._last_results:
                 for img_path in self._last_results.get("output_images", []):
+                    name = os.path.basename(img_path)
+                    if name.upper().startswith("OG_"):
+                        continue
                     if os.path.isfile(img_path):
-                        zf.write(img_path, f"results/{os.path.basename(img_path)}")
+                        zf.write(img_path, f"results/{name}")
                 rpt = self._last_results.get("report_path", "")
                 if rpt and os.path.isfile(rpt):
                     zf.write(rpt, f"results/{os.path.basename(rpt)}")
-
-            # 2. Traceback dir source images (OG + process)
-            if self._traceback_dir:
-                for f in os.listdir(self._traceback_dir):
-                    fpath = os.path.join(self._traceback_dir, f)
-                    if not os.path.isfile(fpath):
-                        continue
-                    if OG_PAT.match(f) or PROC_PAT.match(f):
-                        zf.write(fpath, f"source/{f}")
 
         QMessageBox.information(self, "Saved", f"ZIP saved to:\n{path}")
 
@@ -1671,7 +1663,7 @@ class VisionApp(QWidget):
 
         # Reload original thumbnails if search data is available
         if self._current_vid and self._search_rows:
-            out_dir = os.path.join(OutputRoot, self._current_vid)
+            out_dir = os.path.join(OutputRoot, f"{self._current_vid}_output")
             img_dir = out_dir if os.path.isdir(out_dir) else self._traceback_dir
             if img_dir and _isdir_safe(img_dir):
                 self.load_thumbnails(img_dir, self._search_rows)

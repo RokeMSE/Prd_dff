@@ -13,3 +13,4 @@ coords plot sample.jpg
 Product Diff/Thumbs.db
 *__pycache__
 /Product Diff/build
+Product Diff/defect_traceback.py

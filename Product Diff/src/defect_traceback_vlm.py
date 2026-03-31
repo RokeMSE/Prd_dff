@@ -613,11 +613,6 @@ def draw_box(img, rect, label, color=C_RED, pad=0, thickness=2):
     bx2 = min(w-1, x2); by2 = min(h-1, y2)
     cv2.rectangle(out, (bx1, by1), (bx2, by2), color, thickness)
 
-    cx, cy = (bx1+bx2)//2, (by1+by2)//2
-    arm = max(pad, 15)
-    cv2.line(out, (cx-arm, cy), (cx+arm, cy), color, 1)
-    cv2.line(out, (cx, cy-arm), (cx, cy+arm), color, 1)
-
     font = cv2.FONT_HERSHEY_SIMPLEX
     fs = 0.4
     (tw, th), _ = cv2.getTextSize(label, font, fs, 1)
@@ -640,7 +635,8 @@ def hstack_padded(imgs, target_h):
         if im is None:
             continue
         s = target_h / im.shape[0]
-        resized.append(cv2.resize(im, None, fx=s, fy=s))
+        interp = cv2.INTER_AREA if s < 1 else cv2.INTER_LANCZOS4
+        resized.append(cv2.resize(im, None, fx=s, fy=s, interpolation=interp))
     if not resized:
         return np.zeros((target_h, 200, 3), dtype=np.uint8)
     return np.hstack(resized)
@@ -713,6 +709,16 @@ def proc_sort_key(fname):
         is_out = m.group(2).lower() == 'out'
         return (num, 0 if is_out else 1)
     return (0, 0)
+
+
+def _natural_join(items):
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return f"{items[0]} and {items[1]}"
+    return ", ".join(items[:-1]) + f", and {items[-1]}"
 
 
 # ============================================================
@@ -866,7 +872,7 @@ def run_traceback(uploads_dir: str, outdir: str,
                     fname, "ALIGN_FAIL", 0,
                     f"Alignment failed ({ar.inliers} inliers)", {}))
                 annotated_imgs.append((fname,
-                    banner(proc, f"{fname} | ALIGN FAIL | INCONCLUSIVE", C_ORANGE)))
+                    banner(proc_n, f"{fname} | ALIGN FAIL | INCONCLUSIVE", C_ORANGE)))
                 continue
 
             pad = ar.adaptive_pad
@@ -882,7 +888,7 @@ def run_traceback(uploads_dir: str, outdir: str,
                     fname, "OUT_OF_VIEW", 0,
                     f"Mapped box outside image ({pw}x{ph})", {}))
                 annotated_imgs.append((fname,
-                    banner(proc, f"{fname} | OUT OF VIEW | N/A", C_ORANGE)))
+                    banner(proc_n, f"{fname} | OUT OF VIEW | N/A", C_ORANGE)))
                 continue
 
             zone = detector._extract_zone(proc_n, proc_rect, context_pad=VLM_CONTEXT_PAD)
@@ -912,18 +918,34 @@ def run_traceback(uploads_dir: str, outdir: str,
             elif fname in vlm_map:
                 verdicts.append(vlm_map[fname])
 
-        # Annotate process images
+        # Origin validation / fallback (must be done before annotation so colours are correct)
+        if origin == "DVI":
+            origin = "DVI (defect first appears at final inspection)"
+        elif origin == "UNKNOWN" or origin not in [pz['filename'] for pz in proc_zones]:
+            present = [v for v in verdicts if v.status == "PRESENT"]
+            if present:
+                origin = max(present, key=lambda v: v.confidence).filename
+            elif all(v.status == "ABSENT" for v in verdicts
+                     if v.status not in ("ALIGN_FAIL", "OUT_OF_VIEW", "VLM_ERROR")):
+                origin = "DVI (defect first appears at final inspection)"
+            else:
+                inc = [v for v in verdicts if v.status == "INCONCLUSIVE"]
+                if inc:
+                    origin = f"INCONCLUSIVE (possibly {inc[0].filename})"
+
+        # Annotate process images (preprocessed; origin=red, others=green)
         for v in verdicts:
             fname = v.filename
             if v.status in ("ALIGN_FAIL", "OUT_OF_VIEW") or fname not in proc_rects:
                 continue
             proc_rect, pad = proc_rects[fname]
             ar = alignments[fname]
-            proc = proc_imgs[fname]
+            proc = proc_imgs_mild[fname]
             ph, pw = proc.shape[:2]
 
+            box_color = C_RED if fname == origin else C_GREEN
             tight_rect = aligner.map_rect(ref_rect, ar, pad=0)
-            ann = draw_box(proc, proc_rect, d.dr_sub_item, color=C_RED, pad=0, thickness=2)
+            ann = draw_box(proc, proc_rect, d.dr_sub_item, color=box_color, pad=0, thickness=2)
             if tight_rect is not None:
                 tx1, ty1, tx2, ty2 = tight_rect
                 cv2.rectangle(ann,
@@ -942,66 +964,61 @@ def run_traceback(uploads_dir: str, outdir: str,
             cv2.imwrite(out_p, ann)
             output_images.append(out_p)
 
-        # Origin validation / fallback
-        if origin == "DVI":
-            origin = "DVI (defect first appears at final inspection)"
-        elif origin == "UNKNOWN" or origin not in [pz['filename'] for pz in proc_zones]:
-            present = [v for v in verdicts if v.status == "PRESENT"]
-            if present:
-                origin = max(present, key=lambda v: v.confidence).filename
-            elif all(v.status == "ABSENT" for v in verdicts
-                     if v.status not in ("ALIGN_FAIL", "OUT_OF_VIEW", "VLM_ERROR")):
-                origin = "DVI (defect first appears at final inspection)"
-            else:
-                inc = [v for v in verdicts if v.status == "INCONCLUSIVE"]
-                if inc:
-                    origin = f"INCONCLUSIVE (possibly {inc[0].filename})"
-
         # Build traceback panel
-        THUMB_H = 600
-        LABEL_H = 28
+        THUMB_H = 1200
+        LABEL_H = 64
+
+        def _interp(s):
+            return cv2.INTER_AREA if s < 1 else cv2.INTER_LANCZOS4
 
         def _add_bottom_label(img, text):
-            """Append a black bar with white text at the bottom of an image."""
+            """Append a fixed-height label bar. img must already be scaled to THUMB_H
+            so that every label uses the same font size across all images."""
             w = img.shape[1]
             bar = np.zeros((LABEL_H, w, 3), dtype=np.uint8)
-            # Truncate text to fit width
-            max_chars = max(1, w // 8)
-            disp = text if len(text) <= max_chars else text[:max_chars-2] + ".."
-            cv2.putText(bar, disp, (4, LABEL_H - 8),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.42, C_WHITE, 1, cv2.LINE_AA)
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            fs = 1.1
+            (tw, _th), _ = cv2.getTextSize(text, font, fs, 2)
+            while tw > w - 12 and fs > 0.4:
+                fs -= 0.05
+                (tw, _th), _ = cv2.getTextSize(text, font, fs, 2)
+            cv2.putText(bar, text, (8, LABEL_H - 18), font, fs, C_WHITE, 2, cv2.LINE_AA)
             return np.vstack([img, bar])
 
         panel_imgs = []
         og_ann = draw_box(og_img.copy(), og_rect, d.dr_sub_item, pad=30)
         og_ann = banner(og_ann, f"OG: {ref_key}", C_RED)
+        s = THUMB_H / og_ann.shape[0]
+        og_ann = cv2.resize(og_ann, None, fx=s, fy=s, interpolation=_interp(s))
         og_ann = _add_bottom_label(og_ann, ref_key)
         panel_imgs.append(og_ann)
 
-        arrow = np.zeros((THUMB_H + LABEL_H, 50, 3), dtype=np.uint8)
-        cv2.arrowedLine(arrow, (45, THUMB_H//2), (5, THUMB_H//2), C_WHITE, 2, tipLength=0.25)
+        arrow = np.zeros((THUMB_H + LABEL_H, 80, 3), dtype=np.uint8)
+        cv2.arrowedLine(arrow, (75, THUMB_H//2), (8, THUMB_H//2), C_WHITE, 3, tipLength=0.25)
         panel_imgs.append(arrow)
 
         for _fname, ann in annotated_imgs:
+            s = THUMB_H / ann.shape[0]
+            ann = cv2.resize(ann, None, fx=s, fy=s, interpolation=_interp(s))
             ann = _add_bottom_label(ann, _fname)
             panel_imgs.append(ann)
-            arr = np.zeros((THUMB_H + LABEL_H, 50, 3), dtype=np.uint8)
-            cv2.arrowedLine(arr, (45, THUMB_H//2), (5, THUMB_H//2), C_WHITE, 2, tipLength=0.25)
+            arr = np.zeros((THUMB_H + LABEL_H, 80, 3), dtype=np.uint8)
+            cv2.arrowedLine(arr, (75, THUMB_H//2), (8, THUMB_H//2), C_WHITE, 3, tipLength=0.25)
             panel_imgs.append(arr)
         if panel_imgs:
             panel_imgs = panel_imgs[:-1]  # drop trailing arrow
 
-        panel = hstack_padded(panel_imgs, THUMB_H)
-        title_bar = np.zeros((40, panel.shape[1], 3), dtype=np.uint8)
+        panel = hstack_padded(panel_imgs, THUMB_H + LABEL_H)
+        title_bar = np.zeros((60, panel.shape[1], 3), dtype=np.uint8)
         cv2.putText(title_bar,
             f"VLM Traceback: {d.dr_sub_item} | "
             f"ctr=({d.box_ctr_x:.0f},{d.box_ctr_y:.0f}) | ORIGIN: {origin}",
-            (5, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.55, C_WHITE, 1, cv2.LINE_AA)
+            (10, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.9, C_WHITE, 2, cv2.LINE_AA)
         panel = np.vstack([title_bar, panel])
 
         panel_path = os.path.join(outdir,
-            f"PANEL_{d.dr_sub_item}_ctr{int(d.box_ctr_x)}_{int(d.box_ctr_y)}.jpg")
-        cv2.imwrite(panel_path, panel, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            f"PANEL_{d.dr_sub_item}_ctr{int(d.box_ctr_x)}_{int(d.box_ctr_y)}.png")
+        cv2.imwrite(panel_path, panel)
         output_images.append(panel_path)
 
         all_results.append((d, verdicts, origin, panel))
@@ -1045,8 +1062,8 @@ def run_traceback(uploads_dir: str, outdir: str,
         cv2.rectangle(crop, (x1 - zx1, y1 - zy1), (x2 - zx1, y2 - zy1), C_RED, 2)
         crop = cv2.resize(crop, None, fx=3, fy=3, interpolation=cv2.INTER_LANCZOS4)
         zpath = os.path.join(outdir,
-            f"ZONE_{d.dr_sub_item}_ctr{int(d.box_ctr_x)}_{int(d.box_ctr_y)}.jpg")
-        cv2.imwrite(zpath, crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            f"ZONE_{d.dr_sub_item}_ctr{int(d.box_ctr_x)}_{int(d.box_ctr_y)}.png")
+        cv2.imwrite(zpath, crop)
         output_images.append(zpath)
 
     # ---------- 7. Text report ----------
@@ -1054,32 +1071,42 @@ def run_traceback(uploads_dir: str, outdir: str,
     lot = defects[0].lot if defects else "N/A"
     vid = defects[0].visual_id if defects else "N/A"
 
+    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     lines = []
     lines.append("=" * 70)
-    lines.append("DEFECT ORIGIN TRACEBACK REPORT (VLM-Assisted)")
+    lines.append("DEFECT ORIGIN TRACEBACK REPORT")
     lines.append("=" * 70)
-    lines.append(f"LOT:       {lot}")
-    lines.append(f"VISUAL_ID: {vid}")
-    lines.append(f"Date:      {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    lines.append(f"Reference: {ref_key}")
-    lines.append(f"Process images ({len(proc_sorted)}): {', '.join(proc_sorted)}")
-    lines.append("")
 
     for d, verdicts, origin, _ in all_results:
+        lines.append(f"DETECT AT:     {origin}")
+        lines.append("")
+        lines.append(f"LOT:       {lot}")
+        lines.append(f"VISUAL_ID: {vid}")
+        lines.append(f"Date:      {now_str}")
+        lines.append(f"Reference: {ref_key}")
+        lines.append(f"Process images ({len(proc_sorted)}): {', '.join(proc_sorted)}")
+        lines.append("")
         lines.append("-" * 70)
-        lines.append(f"DEFECT: {d.dr_sub_item}")
-        lines.append(f"  Location:  ctr=({d.box_ctr_x:.0f}, {d.box_ctr_y:.0f})  "
-                     f"size=({d.box_side_x:.0f} x {d.box_side_y:.0f})")
-        lines.append(f"  OG Image:  {d.og_frame}")
-        lines.append(f"  ORIGIN:    {origin}")
-        lines.append("  Process-by-process VLM verdicts (newest -> oldest):")
+
+        comment = ""
         for v in verdicts:
-            lines.append(f"    {v.filename:20s}  {v.status:15s}  "
-                         f"conf={v.confidence:.0%}  {v.detail[:100]}")
-            reasoning = v.metrics.get("vlm_reasoning", "") if v.metrics else ""
-            if reasoning:
-                for i in range(0, len(reasoning), 80):
-                    lines.append(f"{'':26s}  {reasoning[i:i+80]}")
+            if v.metrics:
+                r = v.metrics.get("vlm_reasoning", "")
+                if r and r != "No reasoning provided":
+                    comment = r
+                    break
+        if not comment:
+            comment = " ".join(v.detail for v in verdicts)
+        lines.append(f"COMMENT: {comment}")
+        lines.append("")
+        lines.append("")
+
+        status_groups: Dict[str, List[str]] = {}
+        for v in verdicts:
+            status_groups.setdefault(v.status, []).append(v.filename)
+        for status in ("PRESENT", "ABSENT", "INCONCLUSIVE", "OUT_OF_VIEW", "ALIGN_FAIL", "VLM_ERROR"):
+            if status in status_groups:
+                lines.append(f"{status:<20s} {_natural_join(status_groups[status])}")
         lines.append("")
 
     lines.append("=" * 70)
@@ -1411,61 +1438,52 @@ def main():
     vid = defects[0].visual_id if defects else "N/A"
 
     rpath = os.path.join(outdir, "TRACEBACK_REPORT_VLM.txt")
+    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     with open(rpath, 'w', encoding='utf-8') as f:
         f.write("=" * 70 + "\n")
-        f.write("DEFECT ORIGIN TRACEBACK REPORT (VLM-Assisted)\n")
+        f.write("DEFECT ORIGIN TRACEBACK REPORT\n")
         f.write("=" * 70 + "\n")
-        f.write(f"LOT:       {lot}\n")
-        f.write(f"VISUAL_ID: {vid}\n")
-        f.write(f"Date:      {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"Reference: {ref_key}\n")
-        # f.write(f"VLM:       {provider} ({vlm.__class__.__name__})\n")
-        f.write(f"Process images ({len(proc_sorted)}): {', '.join(proc_sorted)}\n")
-        f.write("\n")
 
         for d, verdicts, origin, _ in all_results:
+            f.write(f"DETECT AT:     {origin}\n")
+            f.write("\n")
+            f.write(f"LOT:       {lot}\n")
+            f.write(f"VISUAL_ID: {vid}\n")
+            f.write(f"Date:      {now_str}\n")
+            f.write(f"Reference: {ref_key}\n")
+            f.write(f"Process images ({len(proc_sorted)}): {', '.join(proc_sorted)}\n")
+            f.write("\n")
             f.write("-" * 70 + "\n")
-            f.write(f"DEFECT: {d.dr_sub_item}\n")
-            f.write(f"  Location:  ctr=({d.box_ctr_x:.0f}, {d.box_ctr_y:.0f})  "
-                    f"size=({d.box_side_x:.0f} x {d.box_side_y:.0f})\n")
-            f.write(f"  OG Image:  {d.og_frame}\n")
-            f.write(f"  ORIGIN:    {origin}\n")
-            f.write(f"\n  Process-by-process VLM verdicts (newest -> oldest):\n")
+
+            comment = ""
             for v in verdicts:
-                f.write(f"    {v.filename:20s}  {v.status:15s}  conf={v.confidence:.0%}  {v.detail[:100]}\n")
                 if v.metrics:
-                    reasoning = v.metrics.get("vlm_reasoning", "")
-                    if reasoning:
-                        words = reasoning.split()
-                        line = ""
-                        for word in words:
-                            if len(line) + len(word) + 1 > 80:
-                                f.write(f"{'':26s}  {line}\n")
-                                line = word
-                            else:
-                                line = f"{line} {word}" if line else word
-                        if line:
-                            f.write(f"{'':26s}  {line}\n")
+                    r = v.metrics.get("vlm_reasoning", "")
+                    if r and r != "No reasoning provided":
+                        comment = r
+                        break
+            if not comment:
+                comment = " ".join(v.detail for v in verdicts)
+            f.write(f"COMMENT: {comment}\n")
+            f.write("\n")
             f.write("\n")
 
-        total_defect = sum(1 for _, _, _, _ in all_results)
+            status_groups: Dict[str, List[str]] = {}
+            for v in verdicts:
+                status_groups.setdefault(v.status, []).append(v.filename)
+            for status in ("PRESENT", "ABSENT", "INCONCLUSIVE", "OUT_OF_VIEW", "ALIGN_FAIL", "VLM_ERROR"):
+                if status in status_groups:
+                    f.write(f"{status:<20s} {_natural_join(status_groups[status])}\n")
+            f.write("\n")
+
         f.write("=" * 70 + "\n")
-        f.write("SUMARY:\n")
-        f.write(f"TOTAL IMAGE: {len(proc_sorted)} \n")
-        f.write(f"TOTAL DEFECT IMAGE: {total_defect} \n")
-        f.write(f"TOTAL CLEAN IMAGE: {len(proc_sorted) - total_defect} \n")
-        f.write(f"TOTAL INCONCLUSIVE IMAGE: {sum(1 for _, verdicts, _, _ in all_results for v in verdicts if v.status == 'INCONCLUSIVE')} \n")
-        f.write("=" * 70 + "\n")
-        
-        f.write("=" * 70 + "\n")
-        f.write("  PRESENT      - VLM detected defect pattern in process image\n")
-        f.write("  ABSENT       - VLM determined zone is clean / no defect\n")
-        f.write("  INCONCLUSIVE - VLM could not determine with confidence\n")
-        f.write("  OUT_OF_VIEW  - Defect zone outside process image field of view\n")
-        f.write("  ALIGN_FAIL   - Could not align process image to reference\n")
+        f.write("LEGEND:\n")
+        f.write("  PRESENT      - VLM detected defect pattern\n")
+        f.write("  ABSENT       - Zone is clean / no defect\n")
+        f.write("  INCONCLUSIVE - Cannot determine with confidence\n")
+        f.write("  OUT_OF_VIEW  - Defect zone outside process image FOV\n")
+        f.write("  ALIGN_FAIL   - Could not align process image\n")
         f.write("  VLM_ERROR    - VLM service returned an error\n")
-        f.write("\n  ORIGIN = earliest process image where defect is determined PRESENT.\n")
-        f.write("  If all ABSENT -> defect introduced at DVI/final inspection.\n")
         f.write("=" * 70 + "\n")
 
     print(f"  Origin report: {rpath}")

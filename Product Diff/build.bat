@@ -14,11 +14,11 @@ echo [1/3] Installing PyInstaller (if needed)...
 pip install pyinstaller --quiet
 
 echo [2/3] Building StainDetective...
-pyinstaller --clean --noconfirm StainDetective.spec
+pyinstaller --clean --noconfirm StainDetective.spec 
 
 echo [3/3] Done!
 echo.
-echo Executable: dist\StainDetective\StainDetective.exe
+echo Executable: dist\StainDetective.exe
 echo.
 echo IMPORTANT: Place your .env file next to StainDetective.exe
 echo            before running, so VLM credentials are available.
