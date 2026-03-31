@@ -20,6 +20,7 @@ import cv2
 import numpy as np
 import pandas as pd
 import os
+import sys
 import re
 import io
 import json
@@ -205,7 +206,11 @@ def create_vlm_service() -> VLMService:
     """reads .env / environment variables to create the right VLM."""
     try:
         from dotenv import load_dotenv
-        env_path = os.path.join(os.path.dirname(__file__), ".env")
+        # When frozen (PyInstaller), check next to the .exe first
+        if getattr(sys, 'frozen', False):
+            env_path = os.path.join(os.path.dirname(sys.executable), ".env")
+        else:
+            env_path = os.path.join(os.path.dirname(__file__), ".env")
         if os.path.exists(env_path):
             load_dotenv(env_path)
     except ImportError:

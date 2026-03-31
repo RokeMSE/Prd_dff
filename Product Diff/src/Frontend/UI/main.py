@@ -22,8 +22,17 @@ from PySide6.QtWidgets import QAbstractItemView
 # ============================================================
 # PATH SETUP  -- add backend to import path
 # ============================================================
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_DIR = os.path.normpath(os.path.join(SCRIPT_DIR, "..", ".."))
+if getattr(sys, 'frozen', False):
+    # Running inside a PyInstaller bundle
+    BUNDLE_DIR = sys._MEIPASS
+    SCRIPT_DIR = os.path.dirname(sys.executable)
+    PROJECT_DIR = SCRIPT_DIR
+    if BUNDLE_DIR not in sys.path:
+        sys.path.insert(0, BUNDLE_DIR)
+else:
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+    PROJECT_DIR = os.path.normpath(os.path.join(SCRIPT_DIR, "..", ".."))
+    BUNDLE_DIR = None
 if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
@@ -101,11 +110,18 @@ class FlowLayout(QLayout):
 # ============================================================
 # CONFIG
 # ============================================================
-OutputRoot = r".\output"
+def _resolve(relpath):
+    """Resolve a path relative to the bundle (frozen) or project dir."""
+    if BUNDLE_DIR:
+        return os.path.join(BUNDLE_DIR, relpath)
+    return os.path.join(PROJECT_DIR, relpath)
+
+OutputRoot = os.path.join(PROJECT_DIR, "output")
+CloudRoot = r"\\VNATSHFS.intel.com\VNATAnalysis$\MAOATM\VN\Applications\TE\Image_Tracer\result"
 CsvName = "vid_data.csv"
 
-LOGO_PATH = r".\Frontend\assets\logo.png"
-LOADING_GIF = r".\Frontend\assets\loading.gif"
+LOGO_PATH = _resolve(os.path.join("Frontend", "assets", "logo.png"))
+LOADING_GIF = _resolve(os.path.join("Frontend", "assets", "loading.gif"))
 
 # ============================================================
 # THEME
@@ -243,17 +259,34 @@ def proc_sort_key(fname):
     return (0, 0)
 
 
+def _isdir_safe(path):
+    """os.path.isdir that won't hang on unreachable UNC paths."""
+    try:
+        return os.path.isdir(path)
+    except OSError:
+        return False
+
+
+def _isfile_safe(path):
+    """os.path.isfile that won't hang on unreachable UNC paths."""
+    try:
+        return os.path.isfile(path)
+    except OSError:
+        return False
+
+
 def find_traceback_dir(vid):
     """Find the directory containing OG images and DVI CSV for a VID.
-    Checks PROJECT_DIR/{vid} first, then OutputRoot/{vid}.
+    Checks local dirs first, then cloud (UNC) as fallback.
     """
-    candidates = [
-        os.path.join(PROJECT_DIR, vid),
-        os.path.join(OutputRoot, vid),
-    ]
-    for d in candidates:
+    # Check local candidates first (fast)
+    for d in [os.path.join(PROJECT_DIR, vid), os.path.join(OutputRoot, vid)]:
         if os.path.isdir(d):
             return d
+    # Cloud fallback (may be slow if network is unreachable)
+    cloud = os.path.join(CloudRoot, vid)
+    if _isdir_safe(cloud):
+        return cloud
     return None
 
 
@@ -1204,14 +1237,29 @@ class VisionApp(QWidget):
             return
 
         out_dir = os.path.join(OutputRoot, vid)
-        vid_csv = os.path.join(out_dir, CsvName)
 
         self._start_searching()
         self._clear_results()
 
         self._current_vid = vid
         self._traceback_dir = find_traceback_dir(vid)
-        has_vid_csv = os.path.isfile(vid_csv)
+
+        # Look for vid_data.csv — check local paths first, cloud last
+        vid_csv = None
+        for candidate in [
+            os.path.join(out_dir, CsvName),
+            os.path.join(self._traceback_dir, CsvName) if self._traceback_dir else "",
+            os.path.join(CloudRoot, vid, CsvName),
+        ]:
+            if not candidate:
+                continue
+            check = _isfile_safe if candidate.startswith("\\\\") else os.path.isfile
+            if check(candidate):
+                vid_csv = candidate
+                break
+        has_vid_csv = vid_csv is not None
+        # Directory where vid_csv lives (for loading thumbnails)
+        data_dir = os.path.dirname(vid_csv) if vid_csv else self._traceback_dir
 
         # --- Process table from vid_data.csv, or fallback from images ---
         rows = []
@@ -1250,14 +1298,16 @@ class VisionApp(QWidget):
             ):
                 self.table.setItem(i, c, QTableWidgetItem(v))
 
-        # --- DVI table (check traceback dir then output dir) ---
+        # --- DVI table (check local dirs first, cloud last) ---
         dvi_csv = None
-        for d in [self._traceback_dir, out_dir]:
-            if d:
-                candidate = os.path.join(d, "DVI_box_data.csv")
-                if os.path.isfile(candidate):
-                    dvi_csv = candidate
-                    break
+        for d in [self._traceback_dir, out_dir, os.path.join(CloudRoot, vid)]:
+            if not d:
+                continue
+            candidate = os.path.join(d, "DVI_box_data.csv")
+            check = _isfile_safe if candidate.startswith("\\\\") else os.path.isfile
+            if check(candidate):
+                dvi_csv = candidate
+                break
 
         if dvi_csv:
             dvi_rows = read_dvi_csv(dvi_csv)
@@ -1287,8 +1337,8 @@ class VisionApp(QWidget):
             self.dvi_table.hide()
 
         # --- Thumbnails ---
-        if has_vid_csv and rows:
-            self.load_thumbnails(out_dir, rows)
+        if has_vid_csv and rows and data_dir:
+            self.load_thumbnails(data_dir, rows)
         elif self._traceback_dir:
             # No vid_data.csv: show images sorted like the backend (proc_sort_key)
             self._load_thumbnails_from_dir(self._traceback_dir)
@@ -1307,10 +1357,7 @@ class VisionApp(QWidget):
         if self._traceback_dir:
             self.btn_manual.setEnabled(True)
             # Auto only when DVI_box_data.csv exists
-            has_dvi = any(
-                os.path.isfile(os.path.join(d, "DVI_box_data.csv"))
-                for d in [self._traceback_dir, out_dir] if d
-            )
+            has_dvi = dvi_csv is not None
             self.btn_auto.setEnabled(has_dvi)
         else:
             self._set_buttons_enabled(False)
@@ -1346,19 +1393,25 @@ class VisionApp(QWidget):
     # --------------------------------------------------
     # AUTO MODE  (use DVI_box_data.csv)
     # --------------------------------------------------
+    def _local_output_dir(self):
+        """Always write traceback output locally, even if source is on cloud."""
+        local = os.path.join(OutputRoot, self._current_vid)
+        os.makedirs(local, exist_ok=True)
+        return os.path.join(local, "output")
+
     def on_auto(self):
         if not self._traceback_dir:
             QMessageBox.warning(self, "Error", "No traceback data directory found.")
             return
 
         dvi_csv = os.path.join(self._traceback_dir, "DVI_box_data.csv")
-        if not os.path.isfile(dvi_csv):
+        if not _isfile_safe(dvi_csv):
             QMessageBox.warning(
                 self, "Error",
                 "DVI_box_data.csv not found.\nUse Manual mode to draw defect boxes.")
             return
 
-        outdir = os.path.join(self._traceback_dir, "output")
+        outdir = self._local_output_dir()
         self._run_traceback(self._traceback_dir, outdir,
                             defect_boxes=None, ref_image_key=None)
 
@@ -1388,9 +1441,9 @@ class VisionApp(QWidget):
                     ref_name = f
                     break
         elif proc_images:
-            # Fallback: use latest process image (highest sort key)
+            # Fallback: use latest process image (smallest step number, Out)
             proc_images.sort(key=proc_sort_key)
-            ref_name = proc_images[-1]
+            ref_name = proc_images[0]
         else:
             QMessageBox.warning(self, "Error", "No images found in traceback directory.")
             return
@@ -1420,7 +1473,7 @@ class VisionApp(QWidget):
             )
             defect_boxes.append(db)
 
-        outdir = os.path.join(self._traceback_dir, "output")
+        outdir = self._local_output_dir()
         self._run_traceback(self._traceback_dir, outdir,
                             defect_boxes=defect_boxes,
                             ref_image_key=ref_name)
@@ -1619,8 +1672,9 @@ class VisionApp(QWidget):
         # Reload original thumbnails if search data is available
         if self._current_vid and self._search_rows:
             out_dir = os.path.join(OutputRoot, self._current_vid)
-            if os.path.isdir(out_dir):
-                self.load_thumbnails(out_dir, self._search_rows)
+            img_dir = out_dir if os.path.isdir(out_dir) else self._traceback_dir
+            if img_dir and _isdir_safe(img_dir):
+                self.load_thumbnails(img_dir, self._search_rows)
 
 
 # ======================================================

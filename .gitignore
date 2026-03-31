@@ -1,11 +1,15 @@
-/Product Diff/__pycache__
+*/__pycache__
 /Product Diff/Lib
 /Product Diff/Scripts
 /Product Diff/share
 Product Diff/pyvenv.cfg
-/Product Diff/data/output
-/Product Diff/img/output
-.claude/settings.local.json
-Product Diff/.env
-Product Diff/src/.env
-/Product Diff/src/output
+*.env
+*output
+POC-Stains_Detective.pptx
+logo.svg
+coords plot sample.jpg
+/.claude
+/Product Diff/dist
+Product Diff/Thumbs.db
+*__pycache__
+/Product Diff/build

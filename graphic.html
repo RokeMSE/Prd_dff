@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stain Detective Intro</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root {
+            --intel-blue: #0071C5;
+            --intel-dark: #004A86;
+            --alert-red: #C41E3A;
+            --bg-light: #F3F3F3;
+            --text-main: #333333;
+            --module-gray: #D1D1D1;
+        }
+
+        body,
+        html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #111;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        #video-container {
+            width: 900px;
+            height: 500px;
+            background-color: var(--bg-light);
+            position: relative;
+            overflow: hidden;
+            border-radius: 8px;
+            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+        }
+
+        /* Video Elements */
+        .scene {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: none;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .active-scene {
+            display: flex;
+        }
+
+        /* UI Elements */
+        #narration-bar {
+            position: absolute;
+            bottom: 0;
+            width: 100%;
+            background: rgba(0, 74, 134, 0.95);
+            color: white;
+            padding: 20px;
+            box-sizing: border-box;
+            font-size: 1.1rem;
+            text-align: center;
+            min-height: 80px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-top: 4px solid var(--intel-blue);
+        }
+
+        .module {
+            width: 120px;
+            height: 80px;
+            background: var(--intel-dark);
+            color: white;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-weight: bold;
+            border-radius: 4px;
+            position: relative;
+        }
+
+        .chip {
+            width: 60px;
+            height: 60px;
+            background: #aaa;
+            border: 2px solid #666;
+            position: relative;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .chip::after {
+            content: '';
+            width: 30px;
+            height: 30px;
+            background: #444;
+        }
+
+        .stain {
+            position: absolute;
+            width: 15px;
+            height: 15px;
+            background: rgba(0, 0, 0, 0.7);
+            border-radius: 40% 60% 70% 30% / 40% 50% 60% 70%;
+            top: 10px;
+            right: 10px;
+            opacity: 0;
+            transform: scale(0);
+        }
+
+        .alert-icon {
+            color: var(--alert-red);
+            font-size: 40px;
+            position: absolute;
+            top: -50px;
+            opacity: 0;
+        }
+
+        .speech-bubble {
+            background: white;
+            border: 2px solid var(--intel-blue);
+            padding: 8px;
+            border-radius: 8px;
+            position: absolute;
+            top: -60px;
+            font-size: 12px;
+            width: 140px;
+            text-align: center;
+            color: black;
+            opacity: 0;
+        }
+
+        .stamp {
+            font-size: 60px;
+            font-weight: 900;
+            color: var(--alert-red);
+            border: 8px solid var(--alert-red);
+            padding: 10px 30px;
+            transform: rotate(-15deg) scale(3);
+            opacity: 0;
+            text-transform: uppercase;
+        }
+
+        #controls {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            z-index: 100;
+        }
+
+        button {
+            background: var(--intel-blue);
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+
+        button:hover {
+            background: var(--intel-dark);
+        }
+
+        #controls {
+            display: flex;
+            gap: 8px;
+        }
+
+        #pause-btn {
+            background: rgba(0, 0, 0, 0.45);
+            min-width: 44px;
+            font-size: 1.1rem;
+            letter-spacing: 1px;
+        }
+
+        #pause-btn:hover {
+            background: rgba(0, 0, 0, 0.65);
+        }
+
+        /* CCTV Frames */
+        .cctv-container {
+            display: flex;
+            gap: 20px;
+        }
+
+        .frame {
+            border: 2px solid #ccc;
+            padding: 10px;
+            background: white;
+            text-align: center;
+        }
+
+        .frame img {
+            width: 100px;
+            height: 100px;
+            background: #eee;
+        }
+
+        .line {
+            height: 4px;
+            background: var(--intel-blue);
+            width: 50px;
+        }
+
+        .grid-layout {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .highlight-box {
+            border: 4px solid var(--alert-red);
+            position: absolute;
+            pointer-events: none;
+            display: none;
+        }
+
+        /* Speaker icons for Scene 3 fighting modules */
+        .speaker-icon {
+            position: absolute;
+            bottom: -28px;
+            left: 50%;
+            transform: translateX(-50%);
+            opacity: 0;
+            font-size: 20px;
+            filter: drop-shadow(0 0 3px rgba(196, 30, 58, 0.6));
+        }
+
+        .speaker-icon.active {
+            animation: speaker-pulse 0.4s ease-in-out infinite alternate;
+        }
+
+        @keyframes speaker-pulse {
+            0% {
+                transform: translateX(-50%) scale(1) rotate(-8deg);
+            }
+
+            100% {
+                transform: translateX(-50%) scale(1.25) rotate(8deg);
+            }
+        }
+
+        /* Sound wave rings */
+        .sound-waves {
+            position: absolute;
+            bottom: -22px;
+            right: -8px;
+            opacity: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+            align-items: flex-start;
+        }
+
+        .sound-wave {
+            width: 6px;
+            height: 2px;
+            background: var(--alert-red);
+            border-radius: 2px;
+            opacity: 0;
+        }
+
+        .sound-waves.active .sound-wave {
+            animation: wave-emit 0.6s ease-out infinite;
+        }
+
+        .sound-waves.active .sound-wave:nth-child(1) {
+            animation-delay: 0s;
+            width: 8px;
+        }
+
+        .sound-waves.active .sound-wave:nth-child(2) {
+            animation-delay: 0.15s;
+            width: 12px;
+        }
+
+        .sound-waves.active .sound-wave:nth-child(3) {
+            animation-delay: 0.3s;
+            width: 6px;
+        }
+
+        @keyframes wave-emit {
+            0% {
+                opacity: 0.9;
+                transform: scaleX(1);
+            }
+
+            100% {
+                opacity: 0;
+                transform: scaleX(2.5) translateX(4px);
+            }
+        }
+
+        /* Module shake when "fighting" */
+        .module-shake {
+            animation: module-fight 0.15s ease-in-out infinite alternate;
+        }
+
+        @keyframes module-fight {
+            0% {
+                transform: translateX(-2px) rotate(-0.5deg);
+            }
+
+            100% {
+                transform: translateX(2px) rotate(0.5deg);
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <div id="video-container">
+        <div id="controls">
+            <button id="pause-btn">&#10074;&#10074;</button>
+            <button id="play-btn">Replay</button>
+        </div>
+
+        <!-- Scene 1: Defect Caught at VI -->
+        <div id="scene1" class="scene active-scene">
+            <div class="module" style="background: #555;">Inspection</div>
+            <div style="margin-top: 40px;">
+                <div id="s1-chip" class="chip">
+                    <div id="s1-stain" class="stain"></div>
+                </div>
+            </div>
+            <div id="s1-alert" class="alert-icon">⚠️ DEFECT DETECTED</div>
+        </div>
+
+        <!-- Scene 2: Old Method Suspects -->
+        <div id="scene2" class="scene">
+            <div class="grid-layout" style="position: relative;">
+                <div class="module s2-suspect">A</div>
+                <div class="line"></div>
+                <div class="module s2-suspect">B</div>
+                <div class="line"></div>
+                <div class="module s2-suspect">C</div>
+                <div class="line"></div>
+                <div class="module" style="background: #555;">xVI</div>
+
+                <!-- Traceback Graphic OVERLAY -->
+                <div id="s2-trace-overlay"
+                    style="position: absolute; top: -50px; left: 0; width: 630px; height: 50px; pointer-events: none;">
+                    <!-- 3 Arrows -->
+                    <svg width="100%" height="100%" style="position: absolute; top:0; left:0; overflow: visible;">
+                        <defs>
+                            <marker id="s2-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5"
+                                orient="auto">
+                                <polygon points="0 0, 10 3.5, 0 7" fill="var(--alert-red)" />
+                            </marker>
+                        </defs>
+                        <g fill="none" stroke="var(--alert-red)" stroke-width="3">
+                            <path class="s2-arrow" d="M 540 25 L 430 25" marker-end="url(#s2-arrowhead)" opacity="0" />
+                            <path class="s2-arrow" d="M 370 25 L 260 25" marker-end="url(#s2-arrowhead)" opacity="0" />
+                            <path class="s2-arrow" d="M 200 25 L 90 25" marker-end="url(#s2-arrowhead)" opacity="0" />
+                        </g>
+                    </svg>
+                    <!-- Footprints fixed container -->
+                    <div
+                        style="position: absolute; top: 20px; left: 75px; width: 340px; height: 30px; overflow: hidden;">
+                        <div id="s2-footprints-slide"
+                            style="position: absolute; top: 0; right: 0; width: 0px; height: 100%; overflow: hidden; display: flex; flex-direction: row-reverse; opacity: 0; align-items: center;">
+                            <span
+                                style="font-size: 14px; white-space: nowrap; color: var(--intel-blue); display: flex; gap: 8px;">
+                                <i class="fa-solid fa-shoe-prints" style="transform: rotate(-180deg);"></i>
+                                <i class="fa-solid fa-shoe-prints" style="transform: rotate(-180deg);"></i>
+                                <i class="fa-solid fa-shoe-prints" style="transform: rotate(-180deg);"></i>
+                                <i class="fa-solid fa-shoe-prints" style="transform: rotate(-180deg);"></i>
+                                <i class="fa-solid fa-shoe-prints" style="transform: rotate(-180deg);"></i>
+                                <i class="fa-solid fa-shoe-prints" style="transform: rotate(-180deg);"></i>
+                                <i class="fa-solid fa-shoe-prints" style="transform: rotate(-180deg);"></i>
+                                <i class="fa-solid fa-shoe-prints" style="transform: rotate(-180deg);"></i>
+                                <i class="fa-solid fa-shoe-prints" style="transform: rotate(-180deg);"></i>
+                                <i class="fa-solid fa-shoe-prints" style="transform: rotate(-180deg);"></i>
+                            </span>
+                        </div>
+                    </div>
+                    <!-- Magnifier moving -->
+                    <div id="s2-magnifier" style="position: absolute; top: 10px; left: 400px; opacity: 0; z-index: 2;">
+                        <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--intel-dark)"
+                            stroke-width="3" stroke-linecap="round" stroke-linejoin="round"
+                            style="background: var(--bg-light); border-radius: 50%;">
+                            <circle cx="11" cy="11" r="8"></circle>
+                            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                        </svg>
+                    </div>
+                </div>
+            </div>
+            <h2 id="s2-title" style="margin-top: 50px; color: var(--intel-dark);">SUSPECTS IDENTIFIED</h2>
+        </div>
+
+        <!-- Scene 3: Denial -->
+        <div id="scene3" class="scene">
+            <div class="grid-layout">
+                <div class="module" id="s3-modA">A
+                    <div class="speech-bubble" id="s3-b1">"No Commonality Analysis at my module."</div>
+                    <div class="speaker-icon" id="s3-spk1">&#128227;</div>
+                    <div class="sound-waves" id="s3-sw1">
+                        <div class="sound-wave"></div>
+                        <div class="sound-wave"></div>
+                        <div class="sound-wave"></div>
+                    </div>
+                </div>
+                <div class="line"></div>
+                <div class="module" id="s3-modB">B
+                    <div class="speech-bubble" id="s3-b2">"Hardware checked. No abnormal."</div>
+                    <div class="speaker-icon" id="s3-spk2">&#128227;</div>
+                    <div class="sound-waves" id="s3-sw2">
+                        <div class="sound-wave"></div>
+                        <div class="sound-wave"></div>
+                        <div class="sound-wave"></div>
+                    </div>
+                </div>
+                <div class="line"></div>
+                <div class="module" id="s3-modC">C
+                    <div class="speech-bubble" id="s3-b3">"No evidence found here."</div>
+                    <div class="speaker-icon" id="s3-spk3">&#128227;</div>
+                    <div class="sound-waves" id="s3-sw3">
+                        <div class="sound-wave"></div>
+                        <div class="sound-wave"></div>
+                        <div class="sound-wave"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Scene 4: Case Cold -->
+        <div id="scene4" class="scene">
+            <div id="s4-stamp" class="stamp">Unresolved</div>
+            <p style="margin-top: 20px;">Insufficient Evidence</p>
+        </div>
+
+        <!-- Scene 5: Enter Stain Detective -->
+        <div id="scene5" class="scene" style="background: var(--intel-blue); color: white;">
+            <svg width="100" height="100" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="11" cy="11" r="8"></circle>
+                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                <path d="M11 8v6"></path>
+                <path d="M8 11h6"></path>
+            </svg>
+            <h1 style="font-size: 3rem; margin: 10px;">Stain Detective</h1>
+        </div>
+
+        <!-- Scene 6: Image Traceback -->
+        <div id="scene6" class="scene">
+            <h3>Image Traceback Analysis</h3>
+            <div class="cctv-container">
+                <div class="frame" id="f1">
+                    <div class="chip"></div>
+                    <small>A (IN)</small>
+                </div>
+                <div class="frame" id="f2">
+                    <div class="chip"></div>
+                    <small>B (IN)</small>
+                </div>
+                <div class="frame" id="f3">
+                    <div class="chip">
+                        <div class="stain" style="opacity:1; transform: scale(1);"></div>
+                    </div>
+                    <small>B (OUT)</small>
+                </div>
+            </div>
+        </div>
+
+        <!-- Scene 7: Identified Source -->
+        <div id="scene7" class="scene">
+            <h2 style="color: var(--alert-red)">SOURCE FOUND: B</h2>
+            <div style="display: flex; gap: 50px; align-items: center;">
+                <div style="text-align: center;">
+                    <div class="chip" style="transform: scale(1.5);"></div>
+                    <p>Before B: Clean</p>
+                </div>
+                <div style="font-size: 40px;">➔</div>
+                <div style="text-align: center;">
+                    <div class="chip" style="transform: scale(1.5);">
+                        <div class="stain" style="opacity:1; transform: scale(1);"></div>
+                    </div>
+                    <p>After B: Stained</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Scene 8: Conclusion -->
+        <div id="scene8" class="scene">
+            <div id="s8-stamp" class="stamp" style="color: green; border-color: green;">SOLVED</div>
+            <div style="text-align: center; margin-top: 30px;">
+                <h2 style="color: var(--intel-blue)">Stain Detective</h2>
+                <p>Find <b>WHEN</b> it appeared.<br>Find <b>WHERE</b> it happened.</p>
+            </div>
+        </div>
+
+        <div id="narration-bar">
+            Welcome to Stain Detective
+        </div>
+    </div>
+
+    <script>
+        const scenes = [
+            {
+                id: 'scene1',
+                text: "Before packaging and shipment, every chip must pass Visual Inspection. When a stain is detected, the investigation begins.",
+                duration: 7000,
+                action: () => {
+                    const tl = gsap.timeline();
+                    tl.fromTo("#s1-chip", { x: -300 }, { x: 0, duration: 1.5, ease: "power2.out" });
+                    tl.to("#s1-stain", { delay: 1.5, opacity: 1, scale: 1, duration: 0.3 });
+                    tl.to("#s1-alert", { delay: 1.8, opacity: 1, top: 40, duration: 0.5, ease: "back.out" });
+                    tl.timeScale(0.85);
+                }
+            },
+            {
+                id: 'scene2',
+                text: "With the traditional approach, the defect is traced back through previous operations, identifying possible suspects.",
+                duration: 9000,
+                action: () => {
+                    const tl = gsap.timeline();
+                    tl.from(".s2-suspect", { stagger: 0.3, scale: 0, opacity: 0, duration: 0.5 });
+                    tl.to(".s2-arrow", { stagger: 0.4, opacity: 1, duration: 0.3 }, "+=0.2");
+                    tl.to(["#s2-magnifier", "#s2-footprints-slide"], { opacity: 1, duration: 0.2 });
+                    tl.to("#s2-magnifier", { left: 60, duration: 3, ease: "power1.inOut" }, "walk");
+                    tl.to("#s2-footprints-slide", { width: 340, duration: 3, ease: "power1.inOut" }, "walk");
+                    tl.timeScale(0.65);
+                }
+            },
+            {
+                id: 'scene3',
+                text: "But without clear evidence, each operation can deny responsibility.",
+                duration: 7000,
+                action: () => {
+                    // Helper: activate a module's speaker + shake + bubble
+                    const activateModule = (mod, bubble, spk, sw, delay) => {
+                        gsap.to(bubble, { delay, opacity: 1, duration: 0.5, ease: "back.out" });
+                        gsap.to(spk, {
+                            delay, opacity: 1, duration: 0.5, onComplete: () => {
+                                document.querySelector(spk).classList.add('active');
+                            }
+                        });
+                        gsap.to(sw, {
+                            delay: delay + 0.2, opacity: 1, duration: 0.2, onComplete: () => {
+                                document.querySelector(sw).classList.add('active');
+                            }
+                        });
+                        // Module shakes while "talking"
+                        setTimeout(() => {
+                            document.querySelector(mod).classList.add('module-shake');
+                        }, delay * 1000);
+                    };
+
+                    activateModule('#s3-modA', '#s3-b1', '#s3-spk1', '#s3-sw1', 0);
+                    activateModule('#s3-modB', '#s3-b2', '#s3-spk2', '#s3-sw2', 1.2);
+                    activateModule('#s3-modC', '#s3-b3', '#s3-spk3', '#s3-sw3', 2.4);
+                }
+            },
+            {
+                id: 'scene4',
+                text: "The result? No confirmed root cause. The case remains unresolved.",
+                duration: 6000,
+                action: () => {
+                    gsap.to("#s4-stamp", { opacity: 1, scale: 1, duration: 0.6, ease: "bounce.out" });
+                }
+            },
+            {
+                id: 'scene5',
+                text: "That’s where Stain Detective changes the game.",
+                duration: 6000,
+                action: () => {
+                    gsap.from("#scene5 h1", { y: 50, opacity: 0, duration: 0.8 });
+                }
+            },
+            {
+                id: 'scene6',
+                text: "Instead of relying on assumptions, Stain Detective reviews image records captured as the chip moves through each operation.",
+                duration: 7000,
+                action: () => {
+                    gsap.from(".frame", { stagger: 0.5, y: 50, opacity: 0, duration: 0.9 });
+                }
+            },
+            {
+                id: 'scene7',
+                text: "The comparison shows the chip was clean before B and stained immediately after. That means B is the source.",
+                duration: 7000,
+                action: () => {
+                    gsap.from("#scene7 div", { opacity: 0, scale: 0.8, duration: 1 });
+                }
+            },
+            {
+                id: 'scene8',
+                text: "With image-based evidence, Stain Detective helps teams move from suspicion to proof and from delay to faster root cause action.",
+                duration: 7000,
+                action: () => {
+                    gsap.to("#s8-stamp", { opacity: 1, scale: 1, duration: 0.6, ease: "bounce.out" });
+                }
+            }
+        ];
+
+        let currentSceneIdx = 0;
+        let timeout = null;
+        let paused = false;
+        let sceneStartTime = 0;   // when current scene timer started
+        let sceneRemaining = 0;   // ms left when paused
+
+        const pauseBtn = document.getElementById('pause-btn');
+
+        function playScene(idx) {
+            if (idx >= scenes.length) {
+                pauseBtn.textContent = '\u25B6';  // show play icon when done
+                paused = true;
+                return;
+            }
+
+            currentSceneIdx = idx;
+            paused = false;
+            pauseBtn.innerHTML = '&#10074;&#10074;';
+
+            // Clear previous
+            document.querySelectorAll('.scene').forEach(s => s.classList.remove('active-scene'));
+
+            const scene = scenes[idx];
+            const el = document.getElementById(scene.id);
+            el.classList.add('active-scene');
+
+            document.getElementById('narration-bar').innerText = scene.text;
+
+            if (scene.action) scene.action();
+
+            sceneRemaining = scene.duration;
+            sceneStartTime = Date.now();
+            timeout = setTimeout(() => {
+                playScene(idx + 1);
+            }, sceneRemaining);
+        }
+
+        function pausePlayback() {
+            if (paused) return;
+            paused = true;
+            clearTimeout(timeout);
+            timeout = null;
+            // Calculate how much time was left
+            sceneRemaining = Math.max(0, sceneRemaining - (Date.now() - sceneStartTime));
+            // Pause all GSAP tweens
+            gsap.globalTimeline.pause();
+            // Pause CSS animations
+            document.getElementById('video-container').style.animationPlayState = 'paused';
+            document.querySelectorAll('.module-shake, .speaker-icon.active, .sound-waves.active .sound-wave')
+                .forEach(el => el.style.animationPlayState = 'paused');
+            pauseBtn.textContent = '\u25B6';
+        }
+
+        function resumePlayback() {
+            if (!paused) return;
+            paused = false;
+            // Resume GSAP tweens
+            gsap.globalTimeline.resume();
+            // Resume CSS animations
+            document.getElementById('video-container').style.animationPlayState = '';
+            document.querySelectorAll('.module-shake, .speaker-icon.active, .sound-waves.active .sound-wave')
+                .forEach(el => el.style.animationPlayState = '');
+            pauseBtn.innerHTML = '&#10074;&#10074;';
+            // Resume scene timer with remaining time
+            sceneStartTime = Date.now();
+            timeout = setTimeout(() => {
+                playScene(currentSceneIdx + 1);
+            }, sceneRemaining);
+        }
+
+        function resetAll() {
+            clearTimeout(timeout);
+            timeout = null;
+            paused = false;
+            gsap.globalTimeline.resume();
+            gsap.globalTimeline.clear();
+            // Reset element states
+            gsap.set([".s2-suspect", ".frame", "#scene5 h1", "#scene7 div"], { clearProps: "transform,opacity" });
+            gsap.set("#s1-stain", { opacity: 0, scale: 0 });
+            gsap.set(".speech-bubble", { opacity: 0 });
+            gsap.set(".stamp", { opacity: 0, scale: 3 });
+            gsap.set(".alert-icon", { opacity: 0, top: -50 });
+            gsap.set(".speaker-icon, .sound-waves", { opacity: 0 });
+            gsap.set(".s2-arrow", { opacity: 0 });
+            gsap.set("#s2-magnifier", { opacity: 0, left: 400 });
+            gsap.set("#s2-footprints-slide", { opacity: 0, width: 0 });
+            document.querySelectorAll('.module-shake').forEach(el => {
+                el.classList.remove('module-shake');
+                el.style.animationPlayState = '';
+            });
+            document.querySelectorAll('.speaker-icon.active').forEach(el => {
+                el.classList.remove('active');
+                el.style.animationPlayState = '';
+            });
+            document.querySelectorAll('.sound-waves.active').forEach(el => {
+                el.classList.remove('active');
+                el.style.animationPlayState = '';
+            });
+        }
+
+        // Pause / Resume button
+        pauseBtn.addEventListener('click', () => {
+            if (paused) resumePlayback();
+            else pausePlayback();
+        });
+
+        // Replay button
+        document.getElementById('play-btn').addEventListener('click', () => {
+            resetAll();
+            playScene(0);
+        });
+
+        // Spacebar to toggle pause
+        document.addEventListener('keydown', (e) => {
+            if (e.code === 'Space') {
+                e.preventDefault();
+                if (paused) resumePlayback();
+                else pausePlayback();
+            }
+        });
+
+        // Start on load
+        window.onload = () => playScene(0);
+    </script>
+
+</body>
+
+</html>
