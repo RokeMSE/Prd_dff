@@ -140,7 +140,7 @@ class OpenAIVLM(VLMService):
 
 class AzureOpenAIVLM(VLMService):
     def __init__(self, api_key: str, azure_endpoint: str,
-                 model_name: str = "gpt-5",
+                 model_name: str = "gpt-5.4",
                  api_version: str = "2024-12-01-preview"):
         from openai import AzureOpenAI
         import ssl
@@ -170,7 +170,6 @@ class AzureOpenAIVLM(VLMService):
             resp = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=[{"role": "user", "content": content}],
-                temperature=0.2,
             )
             return resp.choices[0].message.content
         except Exception as e:
@@ -519,6 +518,8 @@ Determine in which process step a defect first appeared by examining cropped ima
 3. **Look for other anomalies**: There might be other anomalies present in later steps due to process variations. If seen, make remarks in the report.
 4. **Do NOT confuse normal features with defects**: Circuit patterns, surface texture, imaging noise, and alignment artifacts are NOT defects. A true match must stand out from its local surroundings in a way consistent with the OG defect.
 5. **Assess each image independently first**, then check whether the timeline is consistent.
+6. **Note coverage gaps**: Not all process modules have cameras — if the origin step and the nearest ABSENT step have a numeric gap (step numbers with no images in between), acknowledge that the true origin could be any of those uncaptured steps.
+7. **If the origin is the oldest image in the timeline** (i.e., the defect is already PRESENT in the earliest captured step), note in your reasoning that the defect may have originated from modules prior to the first capture — the true source is unknown.
 
 ## Decision criteria
 - **PRESENT**: You can clearly identify the same defect (matching shape, position, contrast polarity). Confidence ≥ 0.7.
@@ -541,7 +542,7 @@ Determine in which process step a defect first appeared by examining cropped ima
         ...
     ],
     "origin": "<filename where defect first appears, or 'DVI' if absent in all>",
-    "reasoning": "Brief explanation: what visual evidence you saw (or didn't) in key images, what type of defect it may be, any changes in defect appearance over time, and any timeline inconsistencies."
+    "reasoning": "Brief explanation less than 200 words: what visual evidence you saw (or didn't) in key images, what type of defect it may be, any changes in defect appearance over time, and any timeline inconsistencies."
 }}"""
 
         log.info(f"  VLM batch analyzing {len(proc_zones)} process crops for defect {defect_id}...")
@@ -706,13 +707,42 @@ def auto_match_og_to_process(og: np.ndarray, proc_sample: np.ndarray):
     return og, inverted
 
 
-def proc_sort_key(fname):
-    m = re.search(r'(\d+)_(In|Out)', fname, re.IGNORECASE)
-    if m:
-        num = int(m.group(1))
-        is_out = m.group(2).lower() == 'out'
-        return (num, 0 if is_out else 1)
-    return (0, 0)
+def build_proc_sort_key(vid_data_csv: str):
+    """Build a sort-key function ordered by TEST_END_DATE (newest first).
+
+    Falls back to numeric operation number if the CSV is unavailable or an
+    operation is not found.  Out comes before In within the same step.
+    """
+    op_time: Dict[str, datetime] = {}
+    if os.path.isfile(vid_data_csv):
+        try:
+            df = pd.read_csv(vid_data_csv)
+            for _, row in df.iterrows():
+                op = str(row.get('OPERATION', '')).strip()
+                ts_str = str(row.get('TEST_END_DATE', '')).strip()
+                if op and ts_str:
+                    try:
+                        op_time[op] = datetime.strptime(ts_str, '%Y-%m-%d %H:%M:%S')
+                    except ValueError:
+                        pass
+        except Exception:
+            pass
+
+    def _key(fname):
+        m = re.search(r'(\d+)_(In|Out)', fname, re.IGNORECASE)
+        if m:
+            num_str = m.group(1)
+            is_out = m.group(2).lower() == 'out'
+            dt = op_time.get(num_str)
+            if dt:
+                # Negate timestamp so newest sorts first with ascending sort
+                ts = -dt.timestamp()
+            else:
+                ts = -int(num_str)
+            return (ts, 0 if is_out else 1)
+        return (0, 0)
+
+    return _key
 
 
 def _natural_join(items):
@@ -723,6 +753,69 @@ def _natural_join(items):
     if len(items) == 2:
         return f"{items[0]} and {items[1]}"
     return ", ".join(items[:-1]) + f", and {items[-1]}"
+
+
+def _find_potential_guilty_modules(origin: str, verdicts: List[OriginVerdict],
+                                   proc_sorted: List[str], vid_csv: str) -> List[str]:
+    """Return operation numbers that sit between the origin (earliest PRESENT)
+    and the nearest ABSENT step but have no images — no-camera modules that
+    could be the real defect causer."""
+    if not origin or any(x in origin for x in ("DVI", "UNKNOWN", "INCONCLUSIVE")):
+        return []
+
+    m_orig = re.search(r'(\d+)_(In|Out)', origin, re.IGNORECASE)
+    if not m_orig:
+        return []
+    origin_step = int(m_orig.group(1))
+
+    steps_with_images = set()
+    for fname in proc_sorted:
+        m = re.search(r'(\d+)_(In|Out)', fname, re.IGNORECASE)
+        if m:
+            steps_with_images.add(int(m.group(1)))
+
+    try:
+        origin_idx = proc_sorted.index(origin)
+    except ValueError:
+        return []
+
+    # First ABSENT step older than origin (higher index in newest→oldest list)
+    verdict_map = {v.filename: v for v in verdicts}
+    first_absent_step = None
+    for fname in proc_sorted[origin_idx + 1:]:
+        v = verdict_map.get(fname)
+        if v and v.status == "ABSENT":
+            m_a = re.search(r'(\d+)_(In|Out)', fname, re.IGNORECASE)
+            if m_a:
+                first_absent_step = int(m_a.group(1))
+                break
+
+    if first_absent_step is None:
+        return []
+
+    lo = min(origin_step, first_absent_step)
+    hi = max(origin_step, first_absent_step)
+    if hi - lo <= 1:
+        return []
+
+    # Check vid_data.csv for known operations in the gap
+    missing: List[str] = []
+    if os.path.isfile(vid_csv):
+        try:
+            df = pd.read_csv(vid_csv)
+            for _, row in df.iterrows():
+                op = str(row.get('OPERATION', '')).strip()
+                if op.isdigit() and lo < int(op) < hi and int(op) not in steps_with_images:
+                    missing.append(op)
+        except Exception:
+            pass
+
+    if not missing:
+        gap = [str(s) for s in range(lo + 1, hi) if s not in steps_with_images]
+        if gap:
+            missing = gap
+
+    return missing
 
 
 # ============================================================
@@ -827,7 +920,10 @@ def run_traceback(uploads_dir: str, outdir: str,
             ref_key = list(og_imgs.keys())[0]
 
     ref_img_raw = og_imgs[ref_key]
-    proc_sorted = sorted(proc_imgs.keys(), key=proc_sort_key)
+    _vid_candidates = [os.path.join(uploads_dir, 'vid_data.csv'),
+                       os.path.join(outdir, 'vid_data.csv')]
+    vid_csv = next((p for p in _vid_candidates if os.path.isfile(p)), _vid_candidates[0])
+    proc_sorted = sorted(proc_imgs.keys(), key=build_proc_sort_key(vid_csv))
 
     # ---------- 2b. Preprocess ----------
     proc_sample = proc_imgs[proc_sorted[0]]
@@ -947,7 +1043,7 @@ def run_traceback(uploads_dir: str, outdir: str,
             proc = proc_imgs_mild[fname]
             ph, pw = proc.shape[:2]
 
-            box_color = C_RED if fname == origin else C_GREEN
+            box_color = C_RED if v.status == "PRESENT" else C_GREEN
             tight_rect = aligner.map_rect(ref_rect, ar, pad=0)
             ann = draw_box(proc, proc_rect, d.dr_sub_item, color=box_color, pad=0, thickness=2)
             if tight_rect is not None:
@@ -1083,6 +1179,21 @@ def run_traceback(uploads_dir: str, outdir: str,
 
     for d, verdicts, origin, _ in all_results:
         lines.append(f"DETECT AT:     {origin}")
+
+        status_groups: Dict[str, List[str]] = {}
+        for v in verdicts:
+            status_groups.setdefault(v.status, []).append(v.filename)
+        for status in ("PRESENT", "ABSENT", "INCONCLUSIVE", "OUT_OF_VIEW", "ALIGN_FAIL", "VLM_ERROR"):
+            if status in status_groups:
+                lines.append(f"{status:<20s} {_natural_join(status_groups[status])}")
+        lines.append("")
+
+        potential_guilty = _find_potential_guilty_modules(origin, verdicts, proc_sorted, vid_csv)
+        if potential_guilty:
+            lines.append(f"POTENTIAL GUILTY MODULE: {', '.join(potential_guilty)}")
+        if proc_sorted and origin == proc_sorted[-1]:
+            lines.append(f"POTENTIAL GUILTY MODULE: defect present at earliest captured step "
+                         f"({origin}) — may have originated from modules before the first capture.")
         lines.append("")
         lines.append(f"LOT:       {lot}")
         lines.append(f"VISUAL_ID: {vid}")
@@ -1102,15 +1213,6 @@ def run_traceback(uploads_dir: str, outdir: str,
         if not comment:
             comment = " ".join(v.detail for v in verdicts)
         lines.append(f"COMMENT: {comment}")
-        lines.append("")
-        lines.append("")
-
-        status_groups: Dict[str, List[str]] = {}
-        for v in verdicts:
-            status_groups.setdefault(v.status, []).append(v.filename)
-        for status in ("PRESENT", "ABSENT", "INCONCLUSIVE", "OUT_OF_VIEW", "ALIGN_FAIL", "VLM_ERROR"):
-            if status in status_groups:
-                lines.append(f"{status:<20s} {_natural_join(status_groups[status])}")
         lines.append("")
 
     lines.append("=" * 70)
@@ -1200,7 +1302,8 @@ def main():
     ref_img_raw = og_imgs[ref_key]
     print(f"\n  Primary reference frame: {ref_key}")
 
-    proc_sorted = sorted(proc_imgs.keys(), key=proc_sort_key)
+    vid_csv = os.path.join(outdir, 'vid_data.csv')
+    proc_sorted = sorted(proc_imgs.keys(), key=build_proc_sort_key(vid_csv))
     print(f"  Process order: {proc_sorted}")
 
     # ---------- 2b. Preprocess ----------
@@ -1329,7 +1432,8 @@ def main():
             ph, pw = proc.shape[:2]
 
             tight_rect = aligner.map_rect(ref_rect, ar, pad=0)
-            ann = draw_box(proc, proc_rect, d.dr_sub_item, color=C_RED, pad=0, thickness=2)
+            box_color = C_RED if v.status == "PRESENT" else C_GREEN
+            ann = draw_box(proc, proc_rect, d.dr_sub_item, color=box_color, pad=0, thickness=2)
             if tight_rect is not None:
                 tx1, ty1, tx2, ty2 = tight_rect
                 tx1 = max(0, tx1); ty1 = max(0, ty1)
@@ -1478,6 +1582,9 @@ def main():
             for status in ("PRESENT", "ABSENT", "INCONCLUSIVE", "OUT_OF_VIEW", "ALIGN_FAIL", "VLM_ERROR"):
                 if status in status_groups:
                     f.write(f"{status:<20s} {_natural_join(status_groups[status])}\n")
+            if proc_sorted and origin == proc_sorted[-1]:
+                f.write(f"POTENTIAL GUILTY MODULE: defect present at earliest captured step "
+                        f"({origin}) — may have originated from modules before the first capture.\n")
             f.write("\n")
 
         f.write("=" * 70 + "\n")
