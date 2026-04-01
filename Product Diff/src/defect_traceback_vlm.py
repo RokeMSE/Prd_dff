@@ -140,14 +140,17 @@ class OpenAIVLM(VLMService):
 
 class AzureOpenAIVLM(VLMService):
     def __init__(self, api_key: str, azure_endpoint: str,
-                 model_name: str = "gpt-4o",
+                 model_name: str = "gpt-5",
                  api_version: str = "2024-12-01-preview"):
         from openai import AzureOpenAI
+        import ssl
+        import httpx
+        ssl_context = ssl.create_default_context()
         self.client = AzureOpenAI(
             api_key=api_key,
             azure_endpoint=azure_endpoint,
             api_version=api_version,
-            http_client=None,  # Use default HTTP client with retries (important for Azure's occasional timeouts)
+            http_client=httpx.Client(verify=ssl_context)
         )
         self.model_name = model_name
 
