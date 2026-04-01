@@ -1,0 +1,7 @@
+opencv-python
+numpy
+pandas
+Pillow
+python-dotenv
+openai
+PySide6
