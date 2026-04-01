@@ -317,6 +317,25 @@
                 transform: translateX(2px) rotate(0.5deg);
             }
         }
+
+        /* Footstep wave bobbing */
+        @keyframes footstep-bob {
+            0%   { transform: rotate(-180deg) translateY(0px); }
+            100% { transform: rotate(-180deg) translateY(-8px); }
+        }
+        #s2-footprints-slide i {
+            animation: footstep-bob 0.45s ease-in-out infinite alternate;
+        }
+        #s2-footprints-slide i:nth-child(1)  { animation-delay: 0.00s; }
+        #s2-footprints-slide i:nth-child(2)  { animation-delay: 0.045s; }
+        #s2-footprints-slide i:nth-child(3)  { animation-delay: 0.09s; }
+        #s2-footprints-slide i:nth-child(4)  { animation-delay: 0.135s; }
+        #s2-footprints-slide i:nth-child(5)  { animation-delay: 0.18s; }
+        #s2-footprints-slide i:nth-child(6)  { animation-delay: 0.225s; }
+        #s2-footprints-slide i:nth-child(7)  { animation-delay: 0.27s; }
+        #s2-footprints-slide i:nth-child(8)  { animation-delay: 0.315s; }
+        #s2-footprints-slide i:nth-child(9)  { animation-delay: 0.36s; }
+        #s2-footprints-slide i:nth-child(10) { animation-delay: 0.405s; }
     </style>
 </head>
 
@@ -342,31 +361,17 @@
         <!-- Scene 2: Old Method Suspects -->
         <div id="scene2" class="scene">
             <div class="grid-layout" style="position: relative;">
-                <div class="module s2-suspect">A</div>
+                <div class="module s2-suspect" id="s2-modA">A</div>
                 <div class="line"></div>
-                <div class="module s2-suspect">B</div>
+                <div class="module s2-suspect" id="s2-modB">B</div>
                 <div class="line"></div>
-                <div class="module s2-suspect">C</div>
+                <div class="module s2-suspect" id="s2-modC">C</div>
                 <div class="line"></div>
-                <div class="module" style="background: #555;">xVI</div>
+                <div class="module" id="s2-modXVI" style="background: #555;">xVI</div>
 
                 <!-- Traceback Graphic OVERLAY -->
                 <div id="s2-trace-overlay"
                     style="position: absolute; top: -50px; left: 0; width: 630px; height: 50px; pointer-events: none;">
-                    <!-- 3 Arrows -->
-                    <svg width="100%" height="100%" style="position: absolute; top:0; left:0; overflow: visible;">
-                        <defs>
-                            <marker id="s2-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5"
-                                orient="auto">
-                                <polygon points="0 0, 10 3.5, 0 7" fill="var(--alert-red)" />
-                            </marker>
-                        </defs>
-                        <g fill="none" stroke="var(--alert-red)" stroke-width="3">
-                            <path class="s2-arrow" d="M 540 25 L 430 25" marker-end="url(#s2-arrowhead)" opacity="0" />
-                            <path class="s2-arrow" d="M 370 25 L 260 25" marker-end="url(#s2-arrowhead)" opacity="0" />
-                            <path class="s2-arrow" d="M 200 25 L 90 25" marker-end="url(#s2-arrowhead)" opacity="0" />
-                        </g>
-                    </svg>
                     <!-- Footprints fixed container -->
                     <div
                         style="position: absolute; top: 20px; left: 75px; width: 340px; height: 30px; overflow: hidden;">
@@ -457,20 +462,32 @@
         <!-- Scene 6: Image Traceback -->
         <div id="scene6" class="scene">
             <h3>Image Traceback Analysis</h3>
-            <div class="cctv-container">
-                <div class="frame" id="f1">
-                    <div class="chip"></div>
+            <div class="cctv-container" style="gap: 12px;">
+                <div class="frame" id="f1" style="padding: 7px;">
+                    <div class="chip" style="width:50px;height:50px;"></div>
                     <small>A (IN)</small>
                 </div>
-                <div class="frame" id="f2">
-                    <div class="chip"></div>
+                <div class="frame" id="f2" style="padding: 7px;">
+                    <div class="chip" style="width:50px;height:50px;"></div>
                     <small>B (IN)</small>
                 </div>
-                <div class="frame" id="f3">
-                    <div class="chip">
+                <div class="frame" id="f3" style="padding: 7px; border-color: var(--alert-red);">
+                    <div class="chip" style="width:50px;height:50px;">
                         <div class="stain" style="opacity:1; transform: scale(1);"></div>
                     </div>
-                    <small>B (OUT)</small>
+                    <small style="color:var(--alert-red); font-weight:bold;">B (OUT) ⚠</small>
+                </div>
+                <div class="frame" id="f4" style="padding: 7px;">
+                    <div class="chip" style="width:50px;height:50px;">
+                        <div class="stain" style="opacity:1; transform: scale(1);"></div>
+                    </div>
+                    <small>C (IN)</small>
+                </div>
+                <div class="frame" id="f5" style="padding: 7px;">
+                    <div class="chip" style="width:50px;height:50px;">
+                        <div class="stain" style="opacity:1; transform: scale(1);"></div>
+                    </div>
+                    <small>C (OUT)</small>
                 </div>
             </div>
         </div>
@@ -483,7 +500,7 @@
                     <div class="chip" style="transform: scale(1.5);"></div>
                     <p>Before B: Clean</p>
                 </div>
-                <div style="font-size: 40px;">➔</div>
+                <div class="arrow-sep" style="font-size: 40px;">➔</div>
                 <div style="text-align: center;">
                     <div class="chip" style="transform: scale(1.5);">
                         <div class="stain" style="opacity:1; transform: scale(1);"></div>
@@ -514,10 +531,11 @@
                 text: "Before packaging and shipment, every chip must pass Visual Inspection. When a stain is detected, the investigation begins.",
                 duration: 7000,
                 action: () => {
+                    // Stain is present on the chip before it enters frame
+                    gsap.set("#s1-stain", { opacity: 1, scale: 1 });
                     const tl = gsap.timeline();
                     tl.fromTo("#s1-chip", { x: -300 }, { x: 0, duration: 1.5, ease: "power2.out" });
-                    tl.to("#s1-stain", { delay: 1.5, opacity: 1, scale: 1, duration: 0.3 });
-                    tl.to("#s1-alert", { delay: 1.8, opacity: 1, top: 40, duration: 0.5, ease: "back.out" });
+                    tl.to("#s1-alert", { opacity: 1, top: 40, duration: 0.5, ease: "back.out" }, "+=0.3");
                     tl.timeScale(0.85);
                 }
             },
@@ -527,8 +545,14 @@
                 duration: 9000,
                 action: () => {
                     const tl = gsap.timeline();
-                    tl.from(".s2-suspect", { stagger: 0.3, scale: 0, opacity: 0, duration: 0.5 });
-                    tl.to(".s2-arrow", { stagger: 0.4, opacity: 1, duration: 0.3 }, "+=0.2");
+                    // Suspects appear in process order A → B → C → xVI
+                    tl.from("#s2-modA",   { scale: 0, opacity: 0, duration: 0.4 });
+                    tl.from("#s2-modB",   { scale: 0, opacity: 0, duration: 0.4 }, "+=0.15");
+                    tl.from("#s2-modC",   { scale: 0, opacity: 0, duration: 0.4 }, "+=0.15");
+                    tl.from("#s2-modXVI", { scale: 0, opacity: 0, duration: 0.4 }, "+=0.15");
+                    // Traceback arrows xVI → C → B → A
+                    tl.to(".s2-arrow", { stagger: 0.4, opacity: 1, duration: 0.3 }, "+=0.3");
+                    // Magnifier walks left + footprints trail
                     tl.to(["#s2-magnifier", "#s2-footprints-slide"], { opacity: 1, duration: 0.2 });
                     tl.to("#s2-magnifier", { left: 60, duration: 3, ease: "power1.inOut" }, "walk");
                     tl.to("#s2-footprints-slide", { width: 340, duration: 3, ease: "power1.inOut" }, "walk");
@@ -540,28 +564,43 @@
                 text: "But without clear evidence, each operation can deny responsibility.",
                 duration: 7000,
                 action: () => {
-                    // Helper: activate a module's speaker + shake + bubble
-                    const activateModule = (mod, bubble, spk, sw, delay) => {
-                        gsap.to(bubble, { delay, opacity: 1, duration: 0.5, ease: "back.out" });
+                    const TALK = 1.6;  // seconds each module "speaks"
+                    const GAP  = 0.3;  // pause between speakers
+
+                    const speakThenFade = (mod, bubble, spk, sw, delay) => {
+                        const fadeAt = delay + TALK;
+                        // Appear
+                        gsap.to(bubble, { delay, opacity: 1, duration: 0.4, ease: "back.out" });
                         gsap.to(spk, {
-                            delay, opacity: 1, duration: 0.5, onComplete: () => {
+                            delay, opacity: 1, duration: 0.4, onComplete: () => {
                                 document.querySelector(spk).classList.add('active');
                             }
                         });
                         gsap.to(sw, {
-                            delay: delay + 0.2, opacity: 1, duration: 0.2, onComplete: () => {
+                            delay: delay + 0.15, opacity: 1, duration: 0.2, onComplete: () => {
                                 document.querySelector(sw).classList.add('active');
                             }
                         });
-                        // Module shakes while "talking"
                         setTimeout(() => {
                             document.querySelector(mod).classList.add('module-shake');
                         }, delay * 1000);
+
+                        // Fade out after talking
+                        gsap.to([bubble, spk, sw], { delay: fadeAt, opacity: 0, duration: 0.35 });
+                        setTimeout(() => {
+                            const el = document.querySelector(mod);
+                            el.classList.remove('module-shake');
+                            el.style.animationPlayState = '';
+                        }, (fadeAt + 0.35) * 1000);
                     };
 
-                    activateModule('#s3-modA', '#s3-b1', '#s3-spk1', '#s3-sw1', 0);
-                    activateModule('#s3-modB', '#s3-b2', '#s3-spk2', '#s3-sw2', 1.2);
-                    activateModule('#s3-modC', '#s3-b3', '#s3-spk3', '#s3-sw3', 2.4);
+                    const stepA = 0.3;
+                    const stepB = stepA + TALK + GAP;
+                    const stepC = stepB + TALK + GAP;
+
+                    speakThenFade('#s3-modA', '#s3-b1', '#s3-spk1', '#s3-sw1', stepA);
+                    speakThenFade('#s3-modB', '#s3-b2', '#s3-spk2', '#s3-sw2', stepB);
+                    speakThenFade('#s3-modC', '#s3-b3', '#s3-spk3', '#s3-sw3', stepC);
                 }
             },
             {
@@ -593,7 +632,14 @@
                 text: "The comparison shows the chip was clean before B and stained immediately after. That means B is the source.",
                 duration: 7000,
                 action: () => {
-                    gsap.from("#scene7 div", { opacity: 0, scale: 0.8, duration: 1 });
+                    // Stain must be visible from the first frame — set it before any animation
+                    gsap.set("#scene7 .stain", { opacity: 1, scale: 1 });
+                    gsap.from("#scene7 h2", { opacity: 0, y: -20, duration: 0.7 });
+                    // Animate chips by scale only (no opacity) so stain stays visible throughout
+                    gsap.from("#scene7 .chip", { scale: 0.3, duration: 0.8, stagger: 0.4, delay: 0.3 });
+                    gsap.from("#scene7 p",    { opacity: 0, duration: 0.5, stagger: 0.4, delay: 0.5 });
+                    // Arrow between chips
+                    gsap.from("#scene7 .arrow-sep", { opacity: 0, duration: 0.5, delay: 0.7 });
                 }
             },
             {
@@ -683,8 +729,9 @@
             gsap.globalTimeline.resume();
             gsap.globalTimeline.clear();
             // Reset element states
-            gsap.set([".s2-suspect", ".frame", "#scene5 h1", "#scene7 div"], { clearProps: "transform,opacity" });
-            gsap.set("#s1-stain", { opacity: 0, scale: 0 });
+            gsap.set(["#scene2 .module", ".frame", "#scene5 h1", "#scene7 .chip", "#scene7 h2", "#scene7 p", "#scene7 .arrow-sep"], { clearProps: "transform,opacity,scale" });
+            gsap.set("#scene7 .stain", { opacity: 1, scale: 1 });
+            gsap.set("#s1-stain", { opacity: 1, scale: 1 });
             gsap.set(".speech-bubble", { opacity: 0 });
             gsap.set(".stamp", { opacity: 0, scale: 3 });
             gsap.set(".alert-icon", { opacity: 0, top: -50 });

@@ -3,7 +3,7 @@ REM ============================================================
 REM Build Stain Detective into a distributable app
 REM ============================================================
 REM Usage:  cd "Product Diff" && build.bat
-REM Output: dist\StainDetective\StainDetective.exe
+REM Output: dist\StainDetective.exe
 REM
 REM Prerequisites:
 REM   pip install pyinstaller PySide6 opencv-python numpy pandas
