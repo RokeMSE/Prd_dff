@@ -510,11 +510,12 @@ Determine in which process step a defect first appeared by examining cropped ima
 - **Defect type**: {defect_info}
 
 ## How to analyze each process image
+0. **If NONE of the images (including the OG) doesn't have a clear defect, you can mark all as INCONCLUSIVE and set origin to DVI.** But if the OG is clearly clean, that may indicate a labeling error or an extremely faint defect — note this in the reasoning.
 1. **Anchor on the OG defect first**: Note its shape, size, contrast (bright or dark vs. background), and orientation from the red box in Image 0.
 2. **Match against the OG**: Look for an anomaly at the center that matches the OG defect in shape, orientation, and contrast polarity. The defect may be slightly fainter, smaller, or less defined in earlier steps. It may also be shifted, rotated, or otherwise shifted from the reference. 
 3. **Look for other anomalies**: There might be other anomalies present in later steps due to process variations. If seen, make remarks in the report.
-3. **Do NOT confuse normal features with defects**: Circuit patterns, surface texture, imaging noise, and alignment artifacts are NOT defects. A true match must stand out from its local surroundings in a way consistent with the OG defect.
-4. **Assess each image independently first**, then check whether the timeline is consistent.
+4. **Do NOT confuse normal features with defects**: Circuit patterns, surface texture, imaging noise, and alignment artifacts are NOT defects. A true match must stand out from its local surroundings in a way consistent with the OG defect.
+5. **Assess each image independently first**, then check whether the timeline is consistent.
 
 ## Decision criteria
 - **PRESENT**: You can clearly identify the same defect (matching shape, position, contrast polarity). Confidence ≥ 0.7.
@@ -537,7 +538,7 @@ Determine in which process step a defect first appeared by examining cropped ima
         ...
     ],
     "origin": "<filename where defect first appears, or 'DVI' if absent in all>",
-    "reasoning": "Brief explanation: what visual evidence you saw (or didn't) in key images, any changes in defect appearance over time, and any timeline inconsistencies."
+    "reasoning": "Brief explanation: what visual evidence you saw (or didn't) in key images, what type of defect it may be, any changes in defect appearance over time, and any timeline inconsistencies."
 }}"""
 
         log.info(f"  VLM batch analyzing {len(proc_zones)} process crops for defect {defect_id}...")
@@ -867,7 +868,7 @@ def run_traceback(uploads_dir: str, outdir: str,
             proc_n = proc_imgs_mild[fname]
             ph, pw = proc.shape[:2]
 
-            if not ar.ok or ar.inliers < 15:
+            if not ar.ok or ar.inliers < 10:
                 skip_verdicts.append(OriginVerdict(
                     fname, "ALIGN_FAIL", 0,
                     f"Alignment failed ({ar.inliers} inliers)", {}))

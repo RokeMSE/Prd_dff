@@ -287,7 +287,7 @@ class AxisAligner:
     More robust because fewer degrees of freedom — rotation / shear are not needed.
     """
     def __init__(self, n_feat: int = 2000, ratio: float = 0.75,
-                 ransac_thresh: float = 5.0):
+                 ransac_thresh: float = 8.0):
         self.n_feat = n_feat
         self.ratio = ratio
         self.ransac_thresh = ransac_thresh

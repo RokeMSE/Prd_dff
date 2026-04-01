@@ -9,8 +9,8 @@ POC-Stains_Detective.pptx
 logo.svg
 coords plot sample.jpg
 /.claude
-/Product Diff/dist
 Product Diff/Thumbs.db
 *__pycache__
 /Product Diff/build
 Product Diff/defect_traceback.py
+crawl.bat

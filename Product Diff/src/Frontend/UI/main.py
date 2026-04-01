@@ -1280,7 +1280,7 @@ class VisionApp(QWidget):
                 elif PROC_PAT.match(f):
                     step += 1
                     rows.append({
-                        "OPERATION": f"Step {step} - {f}",
+                        "OPERATION": f"{step} - {f}",
                         "MODULE": "", "LOT": "",
                         "TESTER": "", "END": "",
                         "KEY": datetime.min,
